@@ -4,7 +4,7 @@
 
 namespace mocktail::vr {
 OpenXrBackend::~OpenXrBackend() = default;
-Status OpenXrBackend::Arm() {
+Status OpenXrBackend::Arm(VrGraphicsApi) {
   return Status::Error(StatusCode::kUnavailable, "OpenXR support is disabled in this build");
 }
 void OpenXrBackend::Disarm() {}

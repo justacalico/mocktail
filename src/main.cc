@@ -351,7 +351,8 @@ int main(int argc, char* argv[]) {
                  "debug device (exact Build ID 2998 only)";
     if (vr_backend_mode == mocktail::vr::VrBackendMode::kXrOutput) {
       std::cerr << "; eye images are submitted to the active OpenXR runtime "
-                   "as a projection layer. Start WiVRn and connect the headset "
+                   "as a projection layer. Start WiVRn or SteamVR/ALVR and "
+                   "connect the headset "
                    "before launching.\n";
     } else {
       std::cerr << "; OpenXR output is disabled in this diagnostic mode "
@@ -894,14 +895,20 @@ int main(int argc, char* argv[]) {
           mocktail::vr::VrBackendMode::kXrOutput) {
         // Fail closed and loudly when no OpenXR runtime is reachable; the
         // native-stereo diagnostic mode must be requested explicitly.
-        const mocktail::Status xr_status = xr_backend.Arm();
+        const mocktail::Status xr_status =
+            xr_backend.Arm(runtime_config.config.graphics_backend() ==
+                                   mocktail::runtime::GraphicsBackend::kVulkan
+                               ? mocktail::vr::VrGraphicsApi::kVulkan
+                               : mocktail::vr::VrGraphicsApi::kOpenGles);
         if (!xr_status.ok()) {
-          std::cerr << "[FATAL] Cannot arm the OpenXR backend for --vr: "
-                    << xr_status.message() << '\n'
-                    << "  Start WiVRn, connect your headset, then run mocktail -vr again.\n"
-                    << "  For a custom runtime set XR_RUNTIME_JSON to its manifest.\n"
-                    << "  Set MOCKTAIL_VR_BACKEND=native for the "
-                       "native-stereo diagnostic mode without a runtime.\n";
+          std::cerr
+              << "[FATAL] Cannot arm the OpenXR backend for --vr: "
+              << xr_status.message() << '\n'
+              << "  Start WiVRn or SteamVR/ALVR, connect your headset, then "
+                 "run mocktail -vr again.\n"
+              << "  For a custom runtime set XR_RUNTIME_JSON to its manifest.\n"
+              << "  Set MOCKTAIL_VR_BACKEND=native for the "
+                 "native-stereo diagnostic mode without a runtime.\n";
           return EXIT_FAILURE;
         }
       }

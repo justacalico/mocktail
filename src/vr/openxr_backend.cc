@@ -2,10 +2,15 @@
 #include "mocktail/vr/vr_perf.h"
 #include "mocktail/vr/vr_pose_math.h"
 
+#include "vr/gles_transport.h"
+#include <EGL/egl.h>
+#include <GLES3/gl3.h>
+
 #include <openxr/openxr.h>
 #include <openxr/openxr_platform.h>
 
 #include <dlfcn.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <array>
@@ -219,7 +224,7 @@ OpenXrBackend* ActiveVrBackend() {
   return g_backend;
 }
 
-Status OpenXrBackend::Arm() {
+Status OpenXrBackend::Arm(VrGraphicsApi graphics_api) {
   std::lock_guard<std::mutex> lock(mutex_);
   if (armed_.load(std::memory_order_acquire)) {
     return Status::Ok();
@@ -234,35 +239,73 @@ Status OpenXrBackend::Arm() {
   }
   try {
     const std::string user_manifest = EnvString("XR_RUNTIME_JSON", "");
-    const auto manifest = SelectVrRuntimeManifest(user_manifest,
-        {"/usr/local/share/openxr/1/openxr_wivrn.json",
-         "/usr/share/openxr/1/openxr_wivrn.json"});
+    const auto preference = EnvString("MOCKTAIL_VR_RUNTIME", "auto");
+    Require(
+        preference == "auto" || preference == "system" ||
+            preference == "wivrn" || preference == "steamvr" ||
+            preference == "alvr",
+        "MOCKTAIL_VR_RUNTIME must be auto, system, wivrn, steamvr, or alvr");
+    const auto discovery =
+        user_manifest.empty()
+            ? DiscoverVrRuntime(
+                  preference, EnvString("HOME", ""),
+                  EnvString("XDG_CONFIG_HOME", ""),
+                  EnvString("XDG_CONFIG_DIRS", ""),
+                  EnvString("XDG_RUNTIME_DIR",
+                            ("/run/user/" + std::to_string(getuid())).c_str()))
+            : VrRuntimeDiscovery{{}, "explicit XR_RUNTIME_JSON override"};
+    const auto manifest =
+        SelectVrRuntimeManifest(user_manifest, discovery.candidates);
+    Log("  [vr-backend] runtime selection: %s\n", discovery.reason.c_str());
+    Require(!manifest.empty() ||
+                (preference != "steamvr" && preference != "alvr" &&
+                 preference != "wivrn"),
+            "Selected VR runtime was not found. For ALVR, install SteamVR and "
+            "set XR_RUNTIME_JSON "
+            "to its steamxr_linux64.json if automatic discovery cannot find "
+            "the installation. "
+            "For WiVRn, install its native runtime or select its manifest "
+            "explicitly.");
     if (!manifest.empty()) {
       Require(setenv("XR_RUNTIME_JSON", manifest.c_str(), 1) == 0,
               "Cannot select the OpenXR runtime");
       Log("  [vr-backend] runtime manifest: %s\n", manifest.c_str());
     } else {
-      Log("  [vr-backend] using registered OpenXR runtime; connect the headset in WiVRn first\n");
+      Log("  [vr-backend] using registered OpenXR runtime; connect the headset "
+          "in WiVRn or SteamVR/ALVR first\n");
     }
-    vk_loader_ = dlopen("libvulkan.so.1", RTLD_NOW | RTLD_LOCAL);
-    Require(vk_loader_ != nullptr,
-            "Cannot load the host Vulkan loader libvulkan.so.1");
-    auto loader_gipa = reinterpret_cast<PFN_vkGetInstanceProcAddr>(
-        dlsym(vk_loader_, "vkGetInstanceProcAddr"));
-    Require(loader_gipa != nullptr, "Host vkGetInstanceProcAddr is missing");
-
-    const char* extension = XR_KHR_VULKAN_ENABLE2_EXTENSION_NAME;
+    graphics_api_ = graphics_api;
+    if (graphics_api_ == VrGraphicsApi::kVulkan) {
+      vk_loader_ = dlopen("libvulkan.so.1", RTLD_NOW | RTLD_LOCAL);
+      Require(vk_loader_ != nullptr,
+              "Cannot load the host Vulkan loader libvulkan.so.1");
+      auto loader_gipa = reinterpret_cast<PFN_vkGetInstanceProcAddr>(
+          dlsym(vk_loader_, "vkGetInstanceProcAddr"));
+      Require(loader_gipa != nullptr, "Host vkGetInstanceProcAddr is missing");
+    }
+    const char *vk_extensions[] = {XR_KHR_VULKAN_ENABLE2_EXTENSION_NAME};
+    const char *gl_extensions[] = {XR_KHR_OPENGL_ES_ENABLE_EXTENSION_NAME,
+                                   XR_MNDX_EGL_ENABLE_EXTENSION_NAME};
     auto info = XrInfo<XrInstanceCreateInfo>(XR_TYPE_INSTANCE_CREATE_INFO);
     std::strcpy(info.applicationInfo.applicationName, "Mocktail Roblox VR");
     std::strcpy(info.applicationInfo.engineName, "Mocktail");
     info.applicationInfo.apiVersion = XR_MAKE_VERSION(1, 0, 0);
-    info.enabledExtensionCount = 1;
-    info.enabledExtensionNames = &extension;
+    info.enabledExtensionCount =
+        graphics_api_ == VrGraphicsApi::kVulkan ? 1 : 2;
+    info.enabledExtensionNames =
+        graphics_api_ == VrGraphicsApi::kVulkan ? vk_extensions : gl_extensions;
     XrInstance instance = XR_NULL_HANDLE;
     const XrResult instance_result = xrCreateInstance(&info, &instance);
     if (instance_result == XR_ERROR_RUNTIME_UNAVAILABLE) {
       throw std::runtime_error("xrCreateInstance: " +
           VrRuntimeUnavailableHint(!user_manifest.empty(), manifest));
+    }
+    if (instance_result == XR_ERROR_EXTENSION_NOT_PRESENT &&
+        graphics_api_ == VrGraphicsApi::kOpenGles) {
+      throw std::runtime_error(
+          "OpenGL VR requires runtime extensions XR_KHR_opengl_es_enable and "
+          "XR_MNDX_egl_enable; select direct-vulkan if the runtime does not "
+          "support EGL.");
     }
     CheckXr(XR_NULL_HANDLE, instance_result, "xrCreateInstance");
     xr_instance_ = instance;
@@ -287,7 +330,8 @@ Status OpenXrBackend::Arm() {
       // state while the server runs with no headset connected.
       throw std::runtime_error(
           "The OpenXR runtime is reachable but reports no connected headset "
-          "(XR_ERROR_FORM_FACTOR_UNAVAILABLE). With WiVRn: start the server "
+          "(XR_ERROR_FORM_FACTOR_UNAVAILABLE). Start WiVRn or SteamVR with "
+          "ALVR "
           "and connect the headset first; VR applications can only run while "
           "the headset connection is established.");
     }
@@ -295,23 +339,36 @@ Status OpenXrBackend::Arm() {
     Require(xr_system_ != XR_NULL_SYSTEM_ID,
             "The OpenXR runtime exposes no head-mounted display system");
 
-    auto graphics_requirements =
-        XrInfo<XrGraphicsRequirementsVulkan2KHR>(
-            XR_TYPE_GRAPHICS_REQUIREMENTS_VULKAN2_KHR);
-    auto get_requirements = reinterpret_cast<PFN_xrGetVulkanGraphicsRequirements2KHR>(
-        ResolveFunction("xrGetVulkanGraphicsRequirements2KHR"));
-    CheckXr(instance,
-            get_requirements(instance, xr_system_, &graphics_requirements),
-            "xrGetVulkanGraphicsRequirements2KHR");
-    Log("  [vr-backend] runtime Vulkan requirement: %u.%u - %u.%u\n",
-        XR_VERSION_MAJOR(graphics_requirements.minApiVersionSupported),
-        XR_VERSION_MINOR(graphics_requirements.minApiVersionSupported),
-        XR_VERSION_MAJOR(graphics_requirements.maxApiVersionSupported),
-        XR_VERSION_MINOR(graphics_requirements.maxApiVersionSupported));
+    if (graphics_api_ == VrGraphicsApi::kVulkan) {
+      auto graphics_requirements = XrInfo<XrGraphicsRequirementsVulkan2KHR>(
+          XR_TYPE_GRAPHICS_REQUIREMENTS_VULKAN2_KHR);
+      auto get_requirements =
+          reinterpret_cast<PFN_xrGetVulkanGraphicsRequirements2KHR>(
+              ResolveFunction("xrGetVulkanGraphicsRequirements2KHR"));
+      CheckXr(instance,
+              get_requirements(instance, xr_system_, &graphics_requirements),
+              "xrGetVulkanGraphicsRequirements2KHR");
+      Log("  [vr-backend] runtime Vulkan requirement: %u.%u - %u.%u\n",
+          XR_VERSION_MAJOR(graphics_requirements.minApiVersionSupported),
+          XR_VERSION_MINOR(graphics_requirements.minApiVersionSupported),
+          XR_VERSION_MAJOR(graphics_requirements.maxApiVersionSupported),
+          XR_VERSION_MINOR(graphics_requirements.maxApiVersionSupported));
 
+    } else {
+      auto requirements = XrInfo<XrGraphicsRequirementsOpenGLESKHR>(
+          XR_TYPE_GRAPHICS_REQUIREMENTS_OPENGL_ES_KHR);
+      auto get = reinterpret_cast<PFN_xrGetOpenGLESGraphicsRequirementsKHR>(
+          ResolveFunction("xrGetOpenGLESGraphicsRequirementsKHR"));
+      CheckXr(instance, get(instance, xr_system_, &requirements),
+              "xrGetOpenGLESGraphicsRequirementsKHR");
+      gl_min_version_ = requirements.minApiVersionSupported;
+      gl_max_version_ = requirements.maxApiVersionSupported;
+    }
     armed_.store(true, std::memory_order_release);
-    Log("  [vr-backend] armed: OpenXR instance/system ready; awaiting the "
-        "guest Vulkan device\n");
+    Log("  [vr-backend] armed: OpenXR instance/system ready; awaiting guest "
+        "%s\n",
+        graphics_api_ == VrGraphicsApi::kVulkan ? "Vulkan device"
+                                                : "OpenGL ES / EGL context");
     return Status::Ok();
   } catch (const std::exception& error) {
     DisarmLocked();
@@ -326,6 +383,10 @@ void OpenXrBackend::Disarm() {
 
 void OpenXrBackend::DisarmLocked() {
   TeardownSessionLocked("disarm");
+  if (gles_)
+    gles_->Destroy();
+  delete gles_;
+  gles_ = nullptr;
   if (xr_instance_ != nullptr) {
     const auto instance = static_cast<XrInstance>(xr_instance_);
     (void)xrDestroyInstance(instance);
@@ -611,6 +672,141 @@ bool OpenXrBackend::InitializeSessionLocked(
             "xrCreateSession");
     xr_session_ = session;
 
+    return InitializeSessionResourcesLocked(error);
+  } catch (const std::exception &exception) {
+    *error = exception.what();
+    TeardownSessionLocked("session init failure", session_recovery_pending_);
+    return false;
+  }
+}
+
+Status OpenXrBackend::AttachGlesContext(void *display, void *config,
+                                        void *context, void *egl_get_proc,
+                                        void *(*resolve)(const char *)) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!armed_ || graphics_api_ != VrGraphicsApi::kOpenGles)
+    return Status::Ok();
+  try {
+    if (gles_) {
+      Require(gles_->context() == context && gles_->display() == display &&
+                  gles_->IsCurrent(),
+              "OpenGL VR cannot switch to a different live EGL context");
+      gles_->MakeCurrent();
+      return Status::Ok();
+    }
+    gles_ = new GlesTransport;
+    std::string error;
+    Require(gles_->Initialize(display, config, context, egl_get_proc, resolve,
+                              &error),
+            error);
+    Require(gles_->version() >= gl_min_version_ &&
+                gles_->version() <= gl_max_version_,
+            "EGL context version is outside the OpenXR runtime's OpenGL ES "
+            "requirements");
+    Require(InitializeGlesSessionLocked(&error), error);
+    Log("  [vr-backend] bound OpenGL ES context to OpenXR; GPU eye copies "
+        "enabled, pose_source=%s\n",
+        EnvString("MOCKTAIL_VR_POSE_SOURCE", "runtime").c_str());
+    return Status::Ok();
+  } catch (const std::exception &error) {
+    TeardownSessionLocked("EGL binding failed");
+    if (gles_)
+      gles_->Destroy();
+    delete gles_;
+    gles_ = nullptr;
+    return Status::Error(StatusCode::kUnavailable, error.what());
+  }
+}
+
+bool OpenXrBackend::InitializeGlesSessionLocked(std::string *error) {
+  try {
+    Require(gles_ && gles_->IsCurrent(),
+            "OpenXR EGL session creation requires the current guest context");
+    auto binding =
+        XrInfo<XrGraphicsBindingEGLMNDX>(XR_TYPE_GRAPHICS_BINDING_EGL_MNDX);
+    binding.display = gles_->display();
+    binding.config = gles_->config();
+    binding.context = gles_->context();
+    binding.getProcAddress =
+        reinterpret_cast<PFN_xrEglGetProcAddressMNDX>(gles_->egl_get_proc());
+    auto info = XrInfo<XrSessionCreateInfo>(XR_TYPE_SESSION_CREATE_INFO);
+    info.next = &binding;
+    info.systemId = xr_system_;
+    XrSession session = XR_NULL_HANDLE;
+    CheckXr(
+        static_cast<XrInstance>(xr_instance_),
+        xrCreateSession(static_cast<XrInstance>(xr_instance_), &info, &session),
+        "xrCreateSession EGL");
+    xr_session_ = session;
+    return InitializeSessionResourcesLocked(error);
+  } catch (const std::exception &exception) {
+    *error = exception.what();
+    TeardownSessionLocked("EGL session init failure",
+                          session_recovery_pending_);
+    return false;
+  }
+}
+
+void OpenXrBackend::DetachGlesContext(void *context) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!gles_ || gles_->context() != context)
+    return;
+  TeardownSessionLocked("EGL context destruction");
+  gles_->Destroy();
+  delete gles_;
+  gles_ = nullptr;
+}
+
+void *OpenXrBackend::WrapGlesProcAddress(const char *name, void *raw) {
+  if (!armed_ || graphics_api_ != VrGraphicsApi::kOpenGles || !gles_)
+    return raw;
+  return GlesTransport::Wrap(name, raw);
+}
+
+void OpenXrBackend::NoteGlesPresent() {
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!armed_ || graphics_api_ != VrGraphicsApi::kOpenGles || !gles_ ||
+        !gles_->IsCurrent())
+      return;
+    for (int i = 0; i < 2; ++i) {
+      const auto &eye = gles_->eye(i);
+      eyes_[i].valid = eye.framebuffer != 0;
+      eyes_[i].frame = eye.frame;
+      eyes_[i].owner = eye.owner;
+      eyes_[i].width = eye.width;
+      eyes_[i].height = eye.height;
+    }
+    const auto &left = gles_->eye(0);
+    const auto &right = gles_->eye(1);
+    eyes_bound_ =
+        left.framebuffer && right.framebuffer &&
+        left.framebuffer != right.framebuffer && left.owner == right.owner &&
+        (left.texture != right.texture || left.object != right.object);
+  }
+  NoteHostPresent(VK_NULL_HANDLE, VK_NULL_HANDLE);
+}
+
+bool OpenXrBackend::CopyGlesEyesIntoSwapchains() {
+  if (!gles_)
+    return false;
+  unsigned textures[2] = {};
+  for (int i = 0; i < 2; ++i) {
+    const auto &slot = eye_swapchains_[i];
+    if (!slot.image_acquired || slot.acquired_index >= slot.gl_images.size())
+      return false;
+    textures[i] = slot.gl_images[slot.acquired_index];
+  }
+  Require(gles_->Copy(textures, eye_swapchains_[0].width,
+                      eye_swapchains_[0].height),
+          "Cannot copy GLES eyes into runtime textures; verify EGL and OpenXR "
+          "use the same GPU and support image sharing");
+  return true;
+}
+
+bool OpenXrBackend::InitializeSessionResourcesLocked(std::string *error) {
+  try {
+    const auto session = static_cast<XrSession>(xr_session_);
     auto space_info = XrInfo<XrReferenceSpaceCreateInfo>(
         XR_TYPE_REFERENCE_SPACE_CREATE_INFO);
     space_info.poseInReferenceSpace.orientation.w = 1;
@@ -670,13 +866,12 @@ bool OpenXrBackend::InitializeSessionLocked(
     }
     recording_.store(true, std::memory_order_release);
     return true;
-  } catch (const std::exception& exception) {
+  } catch (const std::exception &exception) {
     *error = exception.what();
     TeardownSessionLocked("session init failure", session_recovery_pending_);
     return false;
   }
 }
-
 bool OpenXrBackend::CreateSwapchains(std::string* error) {
   try {
     const auto session = static_cast<XrSession>(xr_session_);
@@ -694,10 +889,15 @@ bool OpenXrBackend::CreateSwapchains(std::string* error) {
     // The swapchain format must accept the guest eye content. Prefer the
     // common 8-bit formats; the final choice is cross-checked against the
     // recorded eye images before the first copy (blit converts if needed).
-    VkFormat chosen = VK_FORMAT_UNDEFINED;
-    for (const auto candidate :
-         {VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_R8G8B8A8_UNORM,
-          VK_FORMAT_B8G8R8A8_SRGB, VK_FORMAT_R8G8B8A8_SRGB}) {
+    std::int64_t chosen = 0;
+    const std::vector<std::int64_t> candidates =
+        graphics_api_ == VrGraphicsApi::kVulkan
+            ? std::vector<std::int64_t>{VK_FORMAT_B8G8R8A8_UNORM,
+                                        VK_FORMAT_R8G8B8A8_UNORM,
+                                        VK_FORMAT_B8G8R8A8_SRGB,
+                                        VK_FORMAT_R8G8B8A8_SRGB}
+            : std::vector<std::int64_t>{GL_RGBA8, GL_SRGB8_ALPHA8};
+    for (const auto candidate : candidates) {
       if (std::find(formats.begin(), formats.end(),
                     static_cast<std::int64_t>(candidate)) != formats.end()) {
         chosen = candidate;
@@ -730,30 +930,48 @@ bool OpenXrBackend::CreateSwapchains(std::string* error) {
       CheckXr(static_cast<XrInstance>(xr_instance_),
               xrCreateSwapchain(session, &create_info, &swapchain),
               "xrCreateSwapchain");
+      EyeSwapchain &slot = eye_swapchains_[eye];
+      slot.swapchain =
+          swapchain; // Own immediately, including enumeration failures.
       std::uint32_t image_count = 0;
       CheckXr(static_cast<XrInstance>(xr_instance_),
               xrEnumerateSwapchainImages(swapchain, 0, &image_count, nullptr),
               "xrEnumerateSwapchainImages count");
       Require(image_count > 0 && image_count <= 16,
               "the runtime returned an empty swapchain");
-      std::vector<XrSwapchainImageVulkanKHR> images(image_count);
-      for (auto& image : images) {
-        image.type = XR_TYPE_SWAPCHAIN_IMAGE_VULKAN_KHR;
-      }
-      CheckXr(static_cast<XrInstance>(xr_instance_),
-              xrEnumerateSwapchainImages(
-                  swapchain, image_count, &image_count,
-                  reinterpret_cast<XrSwapchainImageBaseHeader*>(images.data())),
-              "xrEnumerateSwapchainImages");
-      EyeSwapchain& slot = eye_swapchains_[eye];
-      slot.swapchain = swapchain;
-      slot.images.clear();
-      for (const auto& image : images) {
-        slot.images.push_back(image.image);
+      if (graphics_api_ == VrGraphicsApi::kVulkan) {
+        std::vector<XrSwapchainImageVulkanKHR> images(image_count);
+        for (auto &image : images) {
+          image.type = XR_TYPE_SWAPCHAIN_IMAGE_VULKAN_KHR;
+        }
+        CheckXr(
+            static_cast<XrInstance>(xr_instance_),
+            xrEnumerateSwapchainImages(
+                swapchain, image_count, &image_count,
+                reinterpret_cast<XrSwapchainImageBaseHeader *>(images.data())),
+            "xrEnumerateSwapchainImages");
+        slot.images.clear();
+        for (const auto &image : images) {
+          slot.images.push_back(image.image);
+        }
+      } else {
+        std::vector<XrSwapchainImageOpenGLESKHR> images(image_count);
+        for (auto &image : images)
+          image.type = XR_TYPE_SWAPCHAIN_IMAGE_OPENGL_ES_KHR;
+        CheckXr(
+            static_cast<XrInstance>(xr_instance_),
+            xrEnumerateSwapchainImages(
+                swapchain, image_count, &image_count,
+                reinterpret_cast<XrSwapchainImageBaseHeader *>(images.data())),
+            "xrEnumerateSwapchainImages GLES");
+        slot.gl_images.clear();
+        for (const auto &image : images) {
+          slot.gl_images.push_back(image.image);
+        }
       }
       slot.width = width;
       slot.height = height;
-      slot.format = chosen;
+      slot.format = static_cast<VkFormat>(chosen);
       Log("  [vr-backend] eye%d swapchain: %ux%u format=%d images=%u\n", eye,
           width, height, static_cast<int>(chosen), image_count);
     }
@@ -767,6 +985,7 @@ bool OpenXrBackend::CreateSwapchains(std::string* error) {
 void OpenXrBackend::DestroySwapchains() {
   for (EyeSwapchain& slot : eye_swapchains_) {
     slot.images.clear();
+    slot.gl_images.clear();
     if (slot.swapchain != nullptr) {
       (void)xrDestroySwapchain(static_cast<XrSwapchain>(slot.swapchain));
       slot.swapchain = nullptr;
@@ -817,6 +1036,8 @@ void OpenXrBackend::TeardownSessionLocked(const char* reason, bool preserve_devi
   canted_rejection_logged_ = false;
   eyes_[0] = {};
   eyes_[1] = {};
+  if (gles_)
+    gles_->ResetEyes();
   applied_poses_.clear();
   published_pose_.valid = false;
   if (preserve_device) {
@@ -1264,12 +1485,19 @@ void OpenXrBackend::HandleReferenceSpaceChange(std::int64_t change_time) {
 }
 
 bool OpenXrBackend::RecoverSessionLocked(std::uint64_t now_ns) {
-  if (!session_recovery_pending_ || vk_device_ == VK_NULL_HANDLE || vk_ == nullptr ||
-      xr_instance_ == nullptr || now_ns < next_session_retry_ns_) return false;
+  if (!session_recovery_pending_ ||
+      (graphics_api_ == VrGraphicsApi::kVulkan
+           ? (vk_device_ == VK_NULL_HANDLE || vk_ == nullptr)
+           : gles_ == nullptr) ||
+      xr_instance_ == nullptr || now_ns < next_session_retry_ns_)
+    return false;
   next_session_retry_ns_ = now_ns + 1'000'000'000ULL;
   std::string error;
   // nullptr means reuse the verified queue family of this existing VkDevice.
-  if (!InitializeSessionLocked(vk_physical_device_, vk_device_, nullptr, &error)) {
+  if (!(graphics_api_ == VrGraphicsApi::kVulkan
+            ? InitializeSessionLocked(vk_physical_device_, vk_device_, nullptr,
+                                      &error)
+            : InitializeGlesSessionLocked(&error))) {
     Log("  [vr-backend] waiting to restore XR session: %s\n", error.c_str());
     return false;
   }
@@ -1400,10 +1628,13 @@ void OpenXrBackend::RunFrameCycle(VkQueue queue, VkDevice device) {
       }
       const bool copied = [&] {
         const ScopedStageTimer copy_record(perf::Stage::kCopyRecord);
-        return CopyEyesIntoSwapchains(queue);
+        return graphics_api_ == VrGraphicsApi::kVulkan
+                   ? CopyEyesIntoSwapchains(queue)
+                   : CopyGlesEyesIntoSwapchains();
       }() && [&] {
         const ScopedStageTimer evidence_timer(perf::Stage::kEvidence);
-        return CaptureEyeEvidence(queue, 0) && CaptureEyeEvidence(queue, 1);
+        return graphics_api_ == VrGraphicsApi::kOpenGles ||
+               (CaptureEyeEvidence(queue, 0) && CaptureEyeEvidence(queue, 1));
       }();
       for (int eye = 0; eye < 2; ++eye) {
         if (images_held[eye]) {
@@ -1454,14 +1685,23 @@ void OpenXrBackend::RunFrameCycle(VkQueue queue, VkDevice device) {
           (!EnvString("MOCKTAIL_VR_XR_EVIDENCE_DIR", "").empty() &&
            published_pose_.frame % std::max<std::uint64_t>(1,
                EnvUnsigned("MOCKTAIL_VR_XR_EVIDENCE_INTERVAL", 20)) == 0)) {
-        Log("  [vr-backend][evidence] projection submitted=%llu frame=%llu eye0_image=%p "
-            "eye1_image=%p eye0_swapchain_index=%u eye1_swapchain_index=%u\n",
-            static_cast<unsigned long long>(submitted),
-            static_cast<unsigned long long>(published_pose_.frame),
-            static_cast<void*>(eyes_[0].image),
-            static_cast<void*>(eyes_[1].image),
-            eye_swapchains_[0].acquired_index,
-            eye_swapchains_[1].acquired_index);
+        if (graphics_api_ == VrGraphicsApi::kOpenGles) {
+          Log("  [vr-backend][evidence] projection submitted=%llu frame=%llu "
+              "graphics=GLES eye0_texture=%u eye1_texture=%u\n",
+              static_cast<unsigned long long>(submitted),
+              static_cast<unsigned long long>(published_pose_.frame),
+              gles_->eye(0).object, gles_->eye(1).object);
+        } else {
+          Log("  [vr-backend][evidence] projection submitted=%llu frame=%llu "
+              "eye0_image=%p "
+              "eye1_image=%p eye0_swapchain_index=%u eye1_swapchain_index=%u\n",
+              static_cast<unsigned long long>(submitted),
+              static_cast<unsigned long long>(published_pose_.frame),
+              static_cast<void *>(eyes_[0].image),
+              static_cast<void *>(eyes_[1].image),
+              eye_swapchains_[0].acquired_index,
+              eye_swapchains_[1].acquired_index);
+        }
       }
     } else {
       perf::ProcessCollector().Count(perf::Counter::kFramesSkipped);
@@ -2192,3 +2432,32 @@ void mocktail_vr_xr_note_present(VkQueue queue, VkDevice device) {
 }
 
 }  // extern "C"
+
+extern "C" bool mocktail_vr_attach_egl(void *display, void *config,
+                                       void *context, void *egl_get_proc,
+                                       void *(*resolve)(const char *)) {
+  if (auto *backend = mocktail::vr::ActiveVrBackend()) {
+    const auto status = backend->AttachGlesContext(display, config, context,
+                                                   egl_get_proc, resolve);
+    if (!status.ok())
+      std::fprintf(stderr, "  [vr-backend] %s\n", status.message().c_str());
+    return status.ok();
+  }
+  return true;
+}
+extern "C" void mocktail_vr_detach_egl(void *context) {
+  if (auto *backend = mocktail::vr::ActiveVrBackend())
+    backend->DetachGlesContext(context);
+}
+extern "C" void mocktail_vr_release_egl() {
+  mocktail::vr::GlesTransport::ReleaseCurrent();
+}
+extern "C" void *mocktail_vr_wrap_gles_proc(const char *name, void *raw) {
+  if (auto *backend = mocktail::vr::ActiveVrBackend())
+    return backend->WrapGlesProcAddress(name, raw);
+  return raw;
+}
+extern "C" void mocktail_vr_gles_present() {
+  if (auto *backend = mocktail::vr::ActiveVrBackend())
+    backend->NoteGlesPresent();
+}

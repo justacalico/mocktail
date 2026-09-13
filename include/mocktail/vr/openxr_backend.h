@@ -25,10 +25,21 @@ enum class VrBackendMode {
   kXrOutput,
 };
 
-// Explicit XR_RUNTIME_JSON wins. Otherwise prefer a native WiVRn manifest,
-// then let the OpenXR loader use the registered runtime (including Flatpak WiVRn).
+// Explicit XR_RUNTIME_JSON wins. Runtime preference can select SteamVR (ALVR),
+// WiVRn, or the registered OpenXR runtime without changing system registration.
 std::string SelectVrRuntimeManifest(const std::string& explicit_manifest,
                                    const std::vector<std::string>& candidates);
+std::vector<std::string> VrRuntimeManifestCandidates(
+    const std::string &preference, const std::string &home,
+    const std::string &config_home, const std::string &config_dirs);
+struct VrRuntimeDiscovery {
+  std::vector<std::string> candidates;
+  std::string reason;
+};
+VrRuntimeDiscovery DiscoverVrRuntime(
+    const std::string& preference, const std::string& home,
+    const std::string& config_home, const std::string& config_dirs,
+    const std::string& runtime_dir, const std::string& proc_root = "/proc");
 std::string VrRuntimeUnavailableHint(bool user_selected, const std::string& manifest);
 VrBackendMode ResolveVrBackendMode(bool vr_enabled);
 const char* VrBackendModeName(VrBackendMode mode);
@@ -58,6 +69,10 @@ struct ScriptedPoseSample {
 //   frame N+1 and publishing the scripted/runtime head pose that the device
 //   bridge injects into Roblox before its eye passes run.
 //
+// EGL/OpenGL ES uses XR_MNDX_egl_enable on the guest SDL context and GPU
+// framebuffer blits into GLES swapchain textures. It shares the same frame
+// scheduling, tracking, pose application and session recovery below.
+//
 // Eye image provenance is recorded in the adapter during the guest eye
 // initializer (owner = DebugDeviceVR object) and bound to an eye index only
 // through the real per-frame eye-getter request plus the actual render-pass
@@ -67,6 +82,9 @@ struct ScriptedPoseSample {
 // All public entry points are exception-free at their boundary; the
 // implementation is compiled with exceptions like openxr_preview.cc and
 // translates failures into Status/log outcomes.
+class GlesTransport;
+enum class VrGraphicsApi { kVulkan, kOpenGles };
+
 class OpenXrBackend final {
  public:
   OpenXrBackend() = default;
@@ -75,7 +93,14 @@ class OpenXrBackend final {
   OpenXrBackend& operator=(const OpenXrBackend&) = delete;
 
   // Claims the process-wide backend slot and creates XrInstance/system.
-  Status Arm();
+  Status Arm(VrGraphicsApi graphics_api = VrGraphicsApi::kVulkan);
+  // EGL context must be current on the calling thread. Resolver bypasses guest
+  // hooks.
+  Status AttachGlesContext(void *display, void *config, void *context,
+                           void *egl_get_proc, void *(*resolve)(const char *));
+  void DetachGlesContext(void *context);
+  void NoteGlesPresent();
+  void *WrapGlesProcAddress(const char *name, void *raw);
   // Idempotent full teardown (XR resources first, then the instance).
   void Disarm();
   bool armed() const { return armed_.load(std::memory_order_acquire); }
@@ -161,6 +186,7 @@ class OpenXrBackend final {
   struct EyeSwapchain {
     void* swapchain = nullptr;  // XrSwapchain (opaque to keep the header XR-free)
     std::vector<VkImage> images;
+    std::vector<std::uint32_t> gl_images;
     std::uint32_t acquired_index = 0;
     bool image_acquired = false;
     std::uint32_t width = 0;
@@ -172,6 +198,9 @@ class OpenXrBackend final {
                                VkDevice device,
                                const VkDeviceCreateInfo* create_info,
                                std::string* error);
+  bool InitializeGlesSessionLocked(std::string *error);
+  bool InitializeSessionResourcesLocked(std::string *error);
+  bool CopyGlesEyesIntoSwapchains();
   void DisarmLocked();
   void* ResolveFunction(const char* name) const;
   void SetupDeviceAfterCreationLocked(VkPhysicalDevice physical_device,
@@ -200,6 +229,11 @@ class OpenXrBackend final {
   ScriptedPoseSample ComputeScriptedPose(std::uint64_t frame) const;
   void EnsureMirrorForExtent(std::uint32_t width, std::uint32_t height);
   MirrorVkProcs MirrorProcs() const;
+
+  VrGraphicsApi graphics_api_ = VrGraphicsApi::kVulkan;
+  GlesTransport *gles_ = nullptr;
+  std::uint64_t gl_min_version_ = 0;
+  std::uint64_t gl_max_version_ = 0;
 
   mutable std::mutex mutex_;
   std::atomic<bool> armed_{false};

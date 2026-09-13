@@ -14,7 +14,7 @@ add_library(mocktail_vr STATIC
 add_library(Mocktail::VR ALIAS mocktail_vr)
 target_include_directories(mocktail_vr PUBLIC "${CMAKE_SOURCE_DIR}/include")
 target_include_directories(mocktail_vr PRIVATE "${CMAKE_SOURCE_DIR}/src")
-target_link_libraries(mocktail_vr PUBLIC Vulkan::Headers)
+target_link_libraries(mocktail_vr PUBLIC Vulkan::Headers PRIVATE nlohmann_json::nlohmann_json)
 # shm_open for the desktop eye mirror lives in librt on glibc.
 find_library(MOCKTAIL_RT_LIBRARY rt)
 if(MOCKTAIL_RT_LIBRARY)
@@ -47,12 +47,14 @@ if(MOCKTAIL_ENABLE_VR)
   endfunction()
   mocktail_add_openxr_sdk()
   target_sources(mocktail_vr PRIVATE src/vr/openxr_probe.cc src/vr/openxr_preview.cc
-    src/vr/openxr_backend.cc)
+    src/vr/openxr_backend.cc src/vr/gles_transport.cc)
   # Error unwinding is confined to these native session implementations; their
   # public entry points catch errors before returning to the guest runtime.
   set_source_files_properties(src/vr/openxr_preview.cc src/vr/openxr_backend.cc
     PROPERTIES COMPILE_OPTIONS -fexceptions)
   target_compile_definitions(mocktail_vr PRIVATE XR_USE_GRAPHICS_API_VULKAN)
+  set_source_files_properties(src/vr/openxr_backend.cc PROPERTIES COMPILE_DEFINITIONS "XR_USE_GRAPHICS_API_OPENGL_ES;XR_USE_PLATFORM_EGL")
+  target_include_directories(mocktail_vr PRIVATE ${MOCKTAIL_EGL_INCLUDE_DIR} ${MOCKTAIL_GLES3_INCLUDE_DIR})
   target_link_libraries(mocktail_vr PRIVATE OpenXR::openxr_loader Vulkan::Headers ${CMAKE_DL_LIBS})
 else()
   target_sources(mocktail_vr PRIVATE src/vr/openxr_disabled.cc)

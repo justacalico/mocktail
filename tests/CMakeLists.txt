@@ -29,7 +29,7 @@ file(GENERATE
 }
 ]=])
 
-add_executable(vr_mirror_test vr/vr_mirror_test.cc)
+add_executable(vr_mirror_test vr/vr_mirror_test.cc vr/runtime_detection_test.cc)
 target_link_libraries(vr_mirror_test PRIVATE Mocktail::VR GTest::gtest_main)
 mocktail_apply_compile_options(vr_mirror_test)
 add_executable(vr_pose_math_test vr/vr_pose_math_test.cc)
@@ -57,6 +57,11 @@ if(MOCKTAIL_ENABLE_VR)
   target_include_directories(openxr_backend_test PRIVATE "${PROJECT_SOURCE_DIR}/third_party/OpenXR-SDK/include")
   target_link_libraries(openxr_backend_test PRIVATE Mocktail::VR GTest::gtest_main)
   gtest_discover_tests(openxr_backend_test)
+  add_executable(gles_vr_transport_test vr/gles_transport_test.cc)
+  target_include_directories(gles_vr_transport_test PRIVATE "${PROJECT_SOURCE_DIR}/src" "${PROJECT_SOURCE_DIR}/third_party/OpenXR-SDK/include" ${MOCKTAIL_GLES3_INCLUDE_DIR})
+  target_link_libraries(gles_vr_transport_test PRIVATE Mocktail::VR SDL3::SDL3 GTest::gtest_main)
+  gtest_discover_tests(gles_vr_transport_test PROPERTIES ENVIRONMENT "SDL_VIDEODRIVER=offscreen")
+
   add_library(mocktail_test_openxr_runtime MODULE
     vr/fake_openxr_runtime.cc vr/fake_openxr_preview.cc)
   target_link_libraries(mocktail_test_openxr_runtime PRIVATE

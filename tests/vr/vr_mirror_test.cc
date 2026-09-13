@@ -66,7 +66,10 @@ class SegmentReader {
 
 TEST(VrRuntimeSelection, RuntimeErrorsPreserveSelectionProvenance) {
   EXPECT_NE(VrRuntimeUnavailableHint(true, "/custom.json").find("User-selected"), std::string::npos);
-  EXPECT_NE(VrRuntimeUnavailableHint(false, "/usr/share/openxr/1/openxr_wivrn.json").find("Auto-selected WiVRn"), std::string::npos);
+  EXPECT_NE(
+      VrRuntimeUnavailableHint(false, "/usr/share/openxr/1/openxr_wivrn.json")
+          .find("Selected OpenXR"),
+      std::string::npos);
   EXPECT_NE(VrRuntimeUnavailableHint(false, "").find("registered"), std::string::npos);
 }
 
@@ -198,3 +201,28 @@ TEST(VrMirrorProducer, RejectsInvalidNameAndOversizedPublish) {
 
 }  // namespace
 }  // namespace mocktail::vr
+
+namespace mocktail::vr {
+TEST(VrRuntimeSelection, AlvrSelectsSteamVrWithoutFallingBackToWiVRn) {
+  const auto alvr = VrRuntimeManifestCandidates("alvr", "/home/test", "", "");
+  EXPECT_EQ(alvr, VrRuntimeManifestCandidates("steamvr", "/home/test", "", ""));
+  ASSERT_FALSE(alvr.empty());
+  for (const auto &path : alvr) {
+    EXPECT_NE(path.find("SteamVR/steamxr_linux64.json"), std::string::npos);
+    EXPECT_EQ(path.find("wivrn"), std::string::npos);
+  }
+  EXPECT_TRUE(
+      VrRuntimeManifestCandidates("system", "/home/test", "", "").empty());
+  EXPECT_EQ(SelectVrRuntimeManifest("/custom/steamxr_linux64.json", alvr),
+            "/custom/steamxr_linux64.json");
+}
+TEST(VrRuntimeSelection, RegisteredRuntimePrecedesInstalledWiVRn) {
+  const auto paths = VrRuntimeManifestCandidates(
+      "auto", "/home/test", "/private/config", "/opt/xdg:/etc/xdg");
+  ASSERT_GE(paths.size(), 4u);
+  EXPECT_EQ(paths[0], "/private/config/openxr/1/active_runtime.x86_64.json");
+  EXPECT_EQ(paths[1], "/private/config/openxr/1/active_runtime.json");
+  EXPECT_EQ(paths[2], "/opt/xdg/openxr/1/active_runtime.x86_64.json");
+  EXPECT_EQ(paths.back(), "/usr/share/openxr/1/openxr_wivrn.json");
+}
+} // namespace mocktail::vr
