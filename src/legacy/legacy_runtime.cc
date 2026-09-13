@@ -56,6 +56,7 @@
 #include "libc_shim/libc_shim.h"
 #include "linker/linker.h"
 #include "mocktail/graphics/bionic_egl_bridge.h"
+#include "mocktail/vr/roblox_vr_device_bridge.h"
 #include "runtime/environment.h"
 #include "runtime/discord_rpc.h"
 #include "runtime/jnivm_platform_web_callbacks.h"
@@ -5609,6 +5610,20 @@ int mocktail::legacy::Run(const runtime::CommandLineOptions& options,
   }
   std::cout << "  [linker] Bionic unwind metadata validated for libroblox\n"
             << std::flush;
+
+  // The experimental VR bridge is armed only for --vr on an exact supported
+  // Build ID. It validates its machine contracts and interposes the
+  // DebugDeviceVR vtable slots after relocations and before guest startup
+  // can create the object. A no-op success while no bridge is armed.
+  if (const mocktail::Status vr_activation =
+          mocktail::vr::NotifyRobloxVrImageLoaded(
+              linker::FindLoadedAndroidLibraryBase("libroblox"));
+      !vr_activation.ok()) {
+    std::cerr << "\n[FATAL] Experimental Roblox VR bridge activation "
+                 "failed: "
+              << vr_activation.message() << '\n';
+    return EXIT_FAILURE;
+  }
 
   // The pre-constructor hook owns installation; repeating arena setup here is
   // not idempotent.

@@ -1,7 +1,17 @@
 #include "mocktail/vr/openxr_probe.h"
+#include "mocktail/vr/openxr_backend.h"
 #include "mocktail/vr/openxr_preview.h"
 
 namespace mocktail::vr {
+OpenXrBackend::~OpenXrBackend() = default;
+Status OpenXrBackend::Arm() {
+  return Status::Error(StatusCode::kUnavailable, "OpenXR support is disabled in this build");
+}
+void OpenXrBackend::Disarm() {}
+OpenXrBackend* ActiveVrBackend() { return nullptr; }
+void OpenXrBackend::NotePoseApplied(void*, std::uint64_t) {}
+ScriptedPoseSample OpenXrBackend::PublishedHeadPose() const { return {}; }
+
 
 PreviewResult RunOpenXrPreview(const PreviewOptions&) {
   PreviewResult result;
@@ -10,6 +20,8 @@ PreviewResult RunOpenXrPreview(const PreviewOptions&) {
       "Mocktail.";
   return result;
 }
+
+bool IsOpenXrSupportCompiled() { return false; }
 
 ProbeReport ProbeOpenXr() {
   ProbeReport report;

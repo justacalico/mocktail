@@ -12,6 +12,20 @@ namespace mocktail {
 namespace runtime {
 namespace {
 
+TEST(CommandLineTest, ShortVrAliasSurvivesReexecAndLastOverrideWins) {
+  const char* arguments[] = {"mocktail", "-vr"};
+  const auto parsed = ParseCommandLine(2, arguments);
+  ASSERT_TRUE(parsed);
+  ASSERT_TRUE(parsed.options.vr_enabled.has_value());
+  EXPECT_TRUE(*parsed.options.vr_enabled);
+  std::vector<std::string> reexec;
+  std::string error;
+  ASSERT_TRUE(BuildCommandLineReexecArguments(parsed.options, 2, arguments, &reexec, &error));
+  EXPECT_EQ(reexec, (std::vector<std::string>{"-vr"}));
+  const char* disabled[] = {"mocktail", "-vr", "--no-vr"};
+  EXPECT_FALSE(*ParseCommandLine(3, disabled).options.vr_enabled);
+}
+
 TEST(CommandLineTest, VrOverrideSurvivesReexecAndCanDisableEnvironmentDefault) {
   const std::array<const char*, 4> arguments = {"mocktail", "--vr",
                                                 "--headless", "--no-vr"};

@@ -283,6 +283,22 @@ TEST(PerformancePolicyTest, PermissionProtocolDoesNotUseTheTestBypass) {
   EXPECT_EQ(parsed.at("DFFlagVoiceChatSkipPermissionCheckForTests"), "False");
 }
 
+TEST(PerformancePolicyTest,
+     VrModeOverridesConflictingFlagAndPreservesSettings) {
+  std::string merged, error;
+  ASSERT_TRUE(MergeVrClientSettingsOverrides(
+      true, R"({"FFlagDebugEnableVREmulator":"False","FIntUnrelated":"42"})",
+      &merged, &error));
+  auto json = nlohmann::json::parse(merged);
+  EXPECT_EQ(json["FFlagDebugEnableVREmulator"], "True");
+  EXPECT_EQ(json["FIntUnrelated"], "42");
+  ASSERT_TRUE(MergeVrClientSettingsOverrides(false, merged, &merged, &error));
+  EXPECT_EQ(nlohmann::json::parse(merged)["FFlagDebugEnableVREmulator"],
+            "False");
+  EXPECT_FALSE(MergeVrClientSettingsOverrides(true, "[]", &merged, &error));
+  EXPECT_FALSE(MergeVrClientSettingsOverrides(true, "bad", &merged, &error));
+}
+
 }  // namespace
 }  // namespace runtime
 }  // namespace mocktail

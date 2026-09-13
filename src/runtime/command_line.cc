@@ -74,8 +74,8 @@ CommandLineParseResult ParseCommandLine(int argc, const char* const argv[]) {
                            &result.options.graphics_backend, &result.error)) {
         return result;
       }
-    } else if (argument == "--vr" || argument == "--no-vr") {
-      result.options.vr_enabled = argument == "--vr";
+    } else if (argument == "--vr" || argument == "-vr" || argument == "--no-vr") {
+      result.options.vr_enabled = argument != "--no-vr";
     } else if (argument == "--allow-unverified-build") {
       result.options.allow_unverified_build = true;
     } else if (argument == "--force-run-latest") {
@@ -256,8 +256,9 @@ std::string CommandLineUsage(const std::string& program_name) {
          "x86_64 libroblox.so\n"
       << "  --headless               Run without creating an SDL window\n"
       << "  --windowed               Force windowed startup (default)\n"
-      << "  --vr / --no-vr           Launch Roblox in experimental VR mode or "
+      << "  -vr / --vr / --no-vr     Launch Roblox via OpenXR (WiVRn) or "
          "disable vr.enabled\n"
+      << "                          VR builds enable VR by default; use --no-vr to opt out.\n"
       << "  --graphics <backend>     direct-vulkan | opengl | system | "
          "angle-vulkan (default: direct-vulkan)\n"
       << "  --allow-unverified-build Run a known but unverified Build-ID "

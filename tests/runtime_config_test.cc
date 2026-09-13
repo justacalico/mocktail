@@ -37,7 +37,7 @@ TEST(RuntimeConfigTest, UsesSupportedDefaults) {
   const RuntimeConfig config = RuntimeConfig::FromEnvironment(environment);
 
   EXPECT_FALSE(config.headless());
-  EXPECT_FALSE(config.vr_enabled());
+  EXPECT_EQ(config.vr_enabled(), kDefaultVrEnabled);
   EXPECT_TRUE(config.vr_valid());
   EXPECT_EQ(config.roblox_library_path(), "rbx_bin/libroblox.so");
   EXPECT_EQ(config.graphics_backend(), GraphicsBackend::kVulkan);
@@ -95,7 +95,7 @@ TEST(RuntimeConfigTest, RejectsMalformedVrEnvironmentInsteadOfEnablingIt) {
   const auto config = RuntimeConfig::FromEnvironment(
       MapEnvironment({{"MOCKTAIL_VR_ENABLED", "maybe"}}));
   EXPECT_FALSE(config.vr_valid());
-  EXPECT_FALSE(config.vr_enabled());
+  EXPECT_EQ(config.vr_enabled(), kDefaultVrEnabled);
 }
 
 TEST(RuntimeConfigTest, ReadsTypedRuntimeValues) {

@@ -81,7 +81,16 @@
         "current_method_rva": "0x32d0f30",
         "select_method_rva": "0x32d0cb4"
       },
-      "reason": "Verified 2026-09-06: exact Build-ID profile passed two isolated no-recovery Tier C Vulkan canaries and real game sessions, including fullscreen state synchronization and host FMOD output-device interposition; legacy executable patches and signal recovery remain disabled."
+      "vr_debug_device_bridge": {
+        "vtable_rva": "0x6c87b38",
+        "constructor_rva": "0x3810614",
+        "state_getter_rva": "0x38109f6",
+        "eye_getter_rva": "0x38109e6",
+        "eye_initializer_rva": "0x3810a18",
+        "emulator_flag_storage_rva": "0x7369920",
+        "device_create_framebuffer_vtable_offset": "0x180"
+      },
+      "reason": "Verified 2026-09-06: exact Build-ID profile passed two isolated no-recovery Tier C Vulkan canaries and real game sessions, including fullscreen state synchronization and host FMOD output-device interposition; legacy executable patches and signal recovery remain disabled. Experimental vr_debug_device_bridge metadata (DebugDeviceVR constructor/state/eye/initializer RVAs) is machine-validated at activation and gated behind --vr; native stereo output is not yet verified end-to-end."
     }
   ]
 }

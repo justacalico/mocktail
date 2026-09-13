@@ -121,6 +121,33 @@ VKAPI_ATTR VkResult VKAPI_CALL vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
 VKAPI_ATTR VkResult VKAPI_CALL vkGetPhysicalDeviceSurfacePresentModesKHR(
     VkPhysicalDevice physical_device, VkSurfaceKHR surface,
     std::uint32_t* present_mode_count, VkPresentModeKHR* present_modes);
+VKAPI_ATTR VkResult VKAPI_CALL vkCreateImage(
+    VkDevice device, const VkImageCreateInfo* create_info,
+    const VkAllocationCallbacks* allocator, VkImage* image);
+VKAPI_ATTR void VKAPI_CALL vkDestroyImage(VkDevice device, VkImage image,
+                                          const VkAllocationCallbacks* allocator);
+VKAPI_ATTR VkResult VKAPI_CALL vkCreateImageView(
+    VkDevice device, const VkImageViewCreateInfo* create_info,
+    const VkAllocationCallbacks* allocator, VkImageView* view);
+VKAPI_ATTR void VKAPI_CALL
+vkDestroyImageView(VkDevice device, VkImageView image_view,
+                   const VkAllocationCallbacks* allocator);
+VKAPI_ATTR VkResult VKAPI_CALL vkCreateFramebuffer(
+    VkDevice device, const VkFramebufferCreateInfo* create_info,
+    const VkAllocationCallbacks* allocator, VkFramebuffer* framebuffer);
+VKAPI_ATTR void VKAPI_CALL
+vkDestroyFramebuffer(VkDevice device, VkFramebuffer framebuffer,
+                     const VkAllocationCallbacks* allocator);
+VKAPI_ATTR VkResult VKAPI_CALL vkCreateRenderPass(
+    VkDevice device, const VkRenderPassCreateInfo* create_info,
+    const VkAllocationCallbacks* allocator, VkRenderPass* render_pass);
+VKAPI_ATTR void VKAPI_CALL
+vkDestroyRenderPass(VkDevice device, VkRenderPass render_pass,
+                    const VkAllocationCallbacks* allocator);
+VKAPI_ATTR void VKAPI_CALL
+vkCmdBeginRenderPass(VkCommandBuffer command_buffer,
+                     const VkRenderPassBeginInfo* begin_info,
+                     VkSubpassContents contents);
 }
 
 namespace {
@@ -130,6 +157,30 @@ using UsesDirectVulkanFn = bool (*)();
 using NotePresentFn = void (*)();
 using NoteHostPresentBeginFn = void (*)();
 using NoteHostPresentEndFn = void (*)(std::int32_t);
+using NoteVrPresentBeginFn = void (*)();
+using VrXrCreateInstanceFn = bool (*)(const VkInstanceCreateInfo*,
+                                      const VkAllocationCallbacks*,
+                                      VkInstance*, VkResult*);
+using VrXrCreateDeviceFn = bool (*)(VkPhysicalDevice,
+                                    const VkDeviceCreateInfo*,
+                                    const VkAllocationCallbacks*, VkDevice*,
+                                    VkResult*);
+using VrXrNoteDeviceDestroyedFn = void (*)(VkDevice);
+using VrXrNoteQueueFn = void (*)(VkDevice, VkQueue, std::uint32_t,
+                                 std::uint32_t);
+using VrXrRecordImageFn = void (*)(VkDevice, VkImage,
+                                   const VkImageCreateInfo*);
+using VrXrRecordImageViewFn = void (*)(VkImageView, VkImage);
+using VrXrRecordFramebufferFn = void (*)(VkFramebuffer,
+                                         const VkFramebufferCreateInfo*);
+using VrXrRecordRenderPassFn = void (*)(VkRenderPass,
+                                        const VkRenderPassCreateInfo*);
+using VrXrNoteDestroyImageFn = void (*)(VkImage);
+using VrXrNoteDestroyImageViewFn = void (*)(VkImageView);
+using VrXrNoteDestroyFramebufferFn = void (*)(VkFramebuffer);
+using VrXrNoteRenderPassBeginFn = void (*)(VkCommandBuffer,
+                                           const VkRenderPassBeginInfo*);
+using VrXrNotePresentFn = void (*)(VkQueue, VkDevice);
 using NoteVulkanCallBeginFn = std::uint64_t (*)(const char*);
 using NoteVulkanCallEndFn = void (*)(std::uint64_t, std::int32_t);
 using NoteSurfaceOutOfDateFn = void (*)();
@@ -160,6 +211,15 @@ struct AdapterState {
     PFN_vkBeginCommandBuffer begin_command_buffer = nullptr;
     PFN_vkEndCommandBuffer end_command_buffer = nullptr;
     PFN_vkResetCommandBuffer reset_command_buffer = nullptr;
+    PFN_vkCreateImage create_image = nullptr;
+    PFN_vkDestroyImage destroy_image = nullptr;
+    PFN_vkCreateImageView create_image_view = nullptr;
+    PFN_vkDestroyImageView destroy_image_view = nullptr;
+    PFN_vkCreateFramebuffer create_framebuffer = nullptr;
+    PFN_vkDestroyFramebuffer destroy_framebuffer = nullptr;
+    PFN_vkCreateRenderPass create_render_pass = nullptr;
+    PFN_vkDestroyRenderPass destroy_render_pass = nullptr;
+    PFN_vkCmdBeginRenderPass cmd_begin_render_pass = nullptr;
   };
 
   struct QueueBinding {
@@ -191,6 +251,21 @@ struct AdapterState {
   std::atomic<NotePresentFn> note_present{nullptr};
   std::atomic<NoteHostPresentBeginFn> note_host_present_begin{nullptr};
   std::atomic<NoteHostPresentEndFn> note_host_present_end{nullptr};
+  std::atomic<NoteVrPresentBeginFn> note_vr_present_begin{nullptr};
+  std::atomic<VrXrCreateInstanceFn> vr_create_instance{nullptr};
+  std::atomic<VrXrCreateDeviceFn> vr_create_device{nullptr};
+  std::atomic<VrXrNoteDeviceDestroyedFn> vr_note_device_destroyed{nullptr};
+  std::atomic<VrXrNoteQueueFn> vr_note_queue{nullptr};
+  std::atomic<VrXrRecordImageFn> vr_record_image{nullptr};
+  std::atomic<VrXrRecordImageViewFn> vr_record_image_view{nullptr};
+  std::atomic<VrXrRecordFramebufferFn> vr_record_framebuffer{nullptr};
+  std::atomic<VrXrRecordRenderPassFn> vr_record_render_pass{nullptr};
+  std::atomic<VrXrNoteDestroyImageFn> vr_note_destroy_image{nullptr};
+  std::atomic<VrXrNoteDestroyImageViewFn> vr_note_destroy_image_view{nullptr};
+  std::atomic<VrXrNoteDestroyFramebufferFn>
+      vr_note_destroy_framebuffer{nullptr};
+  std::atomic<VrXrNoteRenderPassBeginFn> vr_note_render_pass_begin{nullptr};
+  std::atomic<VrXrNotePresentFn> vr_note_present{nullptr};
   std::atomic<NoteVulkanCallBeginFn> note_vulkan_call_begin{nullptr};
   std::atomic<NoteVulkanCallEndFn> note_vulkan_call_end{nullptr};
   std::atomic<NoteSurfaceOutOfDateFn> note_surface_out_of_date{nullptr};
@@ -233,6 +308,59 @@ bool EnsureInitialized() {
   state.note_host_present_end.store(
       ResolveProcessFunction<NoteHostPresentEndFn>(
           "mocktail_window_note_vulkan_host_present_end"),
+      std::memory_order_release);
+  state.note_vr_present_begin.store(
+      ResolveProcessFunction<NoteVrPresentBeginFn>(
+          "mocktail_vr_note_host_present_begin"),
+      std::memory_order_release);
+  state.vr_create_instance.store(
+      ResolveProcessFunction<VrXrCreateInstanceFn>(
+          "mocktail_vr_xr_create_vulkan_instance"),
+      std::memory_order_release);
+  state.vr_create_device.store(
+      ResolveProcessFunction<VrXrCreateDeviceFn>(
+          "mocktail_vr_xr_create_vulkan_device"),
+      std::memory_order_release);
+  state.vr_note_device_destroyed.store(
+      ResolveProcessFunction<VrXrNoteDeviceDestroyedFn>(
+          "mocktail_vr_xr_note_device_destroyed"),
+      std::memory_order_release);
+  state.vr_note_queue.store(
+      ResolveProcessFunction<VrXrNoteQueueFn>("mocktail_vr_xr_note_queue"),
+      std::memory_order_release);
+  state.vr_record_image.store(
+      ResolveProcessFunction<VrXrRecordImageFn>("mocktail_vr_xr_record_image"),
+      std::memory_order_release);
+  state.vr_record_image_view.store(
+      ResolveProcessFunction<VrXrRecordImageViewFn>(
+          "mocktail_vr_xr_record_image_view"),
+      std::memory_order_release);
+  state.vr_record_framebuffer.store(
+      ResolveProcessFunction<VrXrRecordFramebufferFn>(
+          "mocktail_vr_xr_record_framebuffer"),
+      std::memory_order_release);
+  state.vr_record_render_pass.store(
+      ResolveProcessFunction<VrXrRecordRenderPassFn>(
+          "mocktail_vr_xr_record_render_pass"),
+      std::memory_order_release);
+  state.vr_note_destroy_image.store(
+      ResolveProcessFunction<VrXrNoteDestroyImageFn>(
+          "mocktail_vr_xr_note_destroy_image"),
+      std::memory_order_release);
+  state.vr_note_destroy_image_view.store(
+      ResolveProcessFunction<VrXrNoteDestroyImageViewFn>(
+          "mocktail_vr_xr_note_destroy_image_view"),
+      std::memory_order_release);
+  state.vr_note_destroy_framebuffer.store(
+      ResolveProcessFunction<VrXrNoteDestroyFramebufferFn>(
+          "mocktail_vr_xr_note_destroy_framebuffer"),
+      std::memory_order_release);
+  state.vr_note_render_pass_begin.store(
+      ResolveProcessFunction<VrXrNoteRenderPassBeginFn>(
+          "mocktail_vr_xr_note_render_pass_begin"),
+      std::memory_order_release);
+  state.vr_note_present.store(
+      ResolveProcessFunction<VrXrNotePresentFn>("mocktail_vr_xr_note_present"),
       std::memory_order_release);
   const auto call_begin = ResolveProcessFunction<NoteVulkanCallBeginFn>(
       "mocktail_window_note_vulkan_call_begin");
@@ -489,6 +617,24 @@ void RegisterHostDeviceDispatch(VkDevice device,
       get_device_proc_addr(device, "vkEndCommandBuffer"));
   dispatch.reset_command_buffer = reinterpret_cast<PFN_vkResetCommandBuffer>(
       get_device_proc_addr(device, "vkResetCommandBuffer"));
+  dispatch.create_image = reinterpret_cast<PFN_vkCreateImage>(
+      get_device_proc_addr(device, "vkCreateImage"));
+  dispatch.destroy_image = reinterpret_cast<PFN_vkDestroyImage>(
+      get_device_proc_addr(device, "vkDestroyImage"));
+  dispatch.create_image_view = reinterpret_cast<PFN_vkCreateImageView>(
+      get_device_proc_addr(device, "vkCreateImageView"));
+  dispatch.destroy_image_view = reinterpret_cast<PFN_vkDestroyImageView>(
+      get_device_proc_addr(device, "vkDestroyImageView"));
+  dispatch.create_framebuffer = reinterpret_cast<PFN_vkCreateFramebuffer>(
+      get_device_proc_addr(device, "vkCreateFramebuffer"));
+  dispatch.destroy_framebuffer = reinterpret_cast<PFN_vkDestroyFramebuffer>(
+      get_device_proc_addr(device, "vkDestroyFramebuffer"));
+  dispatch.create_render_pass = reinterpret_cast<PFN_vkCreateRenderPass>(
+      get_device_proc_addr(device, "vkCreateRenderPass"));
+  dispatch.destroy_render_pass = reinterpret_cast<PFN_vkDestroyRenderPass>(
+      get_device_proc_addr(device, "vkDestroyRenderPass"));
+  dispatch.cmd_begin_render_pass = reinterpret_cast<PFN_vkCmdBeginRenderPass>(
+      get_device_proc_addr(device, "vkCmdBeginRenderPass"));
 
   AdapterState& state = State();
   std::lock_guard<std::mutex> lock(state.mutex);
@@ -727,6 +873,15 @@ PFN_vkVoidFunction AdapterProc(const char* name) {
   MOCKTAIL_VK_PROC(vkQueueWaitIdle)
   MOCKTAIL_VK_PROC(vkDeviceWaitIdle)
   MOCKTAIL_VK_PROC(vkQueuePresentKHR)
+  MOCKTAIL_VK_PROC(vkCreateImage)
+  MOCKTAIL_VK_PROC(vkDestroyImage)
+  MOCKTAIL_VK_PROC(vkCreateImageView)
+  MOCKTAIL_VK_PROC(vkDestroyImageView)
+  MOCKTAIL_VK_PROC(vkCreateFramebuffer)
+  MOCKTAIL_VK_PROC(vkDestroyFramebuffer)
+  MOCKTAIL_VK_PROC(vkCreateRenderPass)
+  MOCKTAIL_VK_PROC(vkDestroyRenderPass)
+  MOCKTAIL_VK_PROC(vkCmdBeginRenderPass)
 #undef MOCKTAIL_VK_PROC
   return nullptr;
 }
@@ -758,7 +913,16 @@ bool IsDeviceAdapterProc(const char* name) {
                              std::strcmp(name, "vkQueueBindSparse") == 0 ||
                              std::strcmp(name, "vkQueueWaitIdle") == 0 ||
                              std::strcmp(name, "vkDeviceWaitIdle") == 0 ||
-                             std::strcmp(name, "vkQueuePresentKHR") == 0);
+                             std::strcmp(name, "vkQueuePresentKHR") == 0 ||
+                             std::strcmp(name, "vkCreateImage") == 0 ||
+                             std::strcmp(name, "vkDestroyImage") == 0 ||
+                             std::strcmp(name, "vkCreateImageView") == 0 ||
+                             std::strcmp(name, "vkDestroyImageView") == 0 ||
+                             std::strcmp(name, "vkCreateFramebuffer") == 0 ||
+                             std::strcmp(name, "vkDestroyFramebuffer") == 0 ||
+                             std::strcmp(name, "vkCreateRenderPass") == 0 ||
+                             std::strcmp(name, "vkDestroyRenderPass") == 0 ||
+                             std::strcmp(name, "vkCmdBeginRenderPass") == 0);
 }
 
 bool IsGlobalAdapterProc(const char* name) {
@@ -988,10 +1152,12 @@ struct FpsWaitTrace {
     if (count == 0) {
       return;
     }
-    std::fprintf(stderr, "  [fps] %s n=%llu avg=%llu us max=%llu us\n", name,
+    std::fprintf(stderr, "  [fps] %s n=%llu avg=%llu us max=%llu us start_ns=%llu end_ns=%llu\n", name,
                  static_cast<unsigned long long>(count),
                  static_cast<unsigned long long>(total / count / 1000ULL),
-                 static_cast<unsigned long long>(peak / 1000ULL));
+                 static_cast<unsigned long long>(peak / 1000ULL),
+                 static_cast<unsigned long long>(window),
+                 static_cast<unsigned long long>(start_ns));
   }
 };
 
@@ -1027,6 +1193,16 @@ ObservedHostQueuePresent(VkQueue queue, const VkPresentInfoKHR* present_info) {
       state.note_host_present_begin.load(std::memory_order_acquire);
   if (note_begin != nullptr) {
     note_begin();
+  }
+  const NoteVrPresentBeginFn vr_note_begin =
+      state.note_vr_present_begin.load(std::memory_order_acquire);
+  if (vr_note_begin != nullptr) {
+    vr_note_begin();
+  }
+  const VrXrNotePresentFn vr_note_present =
+      state.vr_note_present.load(std::memory_order_acquire);
+  if (vr_note_present != nullptr) {
+    vr_note_present(queue, HostDispatchForQueue(queue).device);
   }
   const bool fps_trace = FpsTraceEnabled();
   const std::uint64_t present_start_ns = fps_trace ? MonotonicNanos() : 0;
@@ -1102,7 +1278,20 @@ vkCreateInstance(const VkInstanceCreateInfo* create_info,
   if (host_create == nullptr) {
     return VK_ERROR_INITIALIZATION_FAILED;
   }
-  const VkResult result = host_create(&host_info, allocator, instance);
+  VkResult result = VK_ERROR_INITIALIZATION_FAILED;
+  bool vr_handled = false;
+  const auto vr_create_instance =
+      State().vr_create_instance.load(std::memory_order_acquire);
+  if (vr_create_instance != nullptr) {
+    // The XR backend creates the instance through xrCreateVulkanInstanceKHR
+    // so the runtime's required instance extensions are enabled on the very
+    // instance Roblox renders with.
+    vr_handled =
+        vr_create_instance(&host_info, allocator, instance, &result);
+  }
+  if (!vr_handled) {
+    result = host_create(&host_info, allocator, instance);
+  }
   if (result == VK_SUCCESS) {
     AdapterState& state = State();
     std::lock_guard<std::mutex> lock(state.mutex);
@@ -1124,6 +1313,10 @@ vkCreateInstance(const VkInstanceCreateInfo* create_info,
 
 VKAPI_ATTR void VKAPI_CALL
 vkDestroyInstance(VkInstance instance, const VkAllocationCallbacks* allocator) {
+  const auto note = ResolveProcessFunction<void (*)(VkInstance)>(
+      "mocktail_vr_xr_note_instance_destroyed");
+  if (note != nullptr) note(instance);
+
   const auto host_destroy = reinterpret_cast<PFN_vkDestroyInstance>(
       HostInstanceProc(instance, "vkDestroyInstance"));
   if (host_destroy != nullptr) {
@@ -1149,6 +1342,21 @@ vkDestroyInstance(VkInstance instance, const VkAllocationCallbacks* allocator) {
     state.note_present.store(nullptr, std::memory_order_release);
     state.note_host_present_begin.store(nullptr, std::memory_order_release);
     state.note_host_present_end.store(nullptr, std::memory_order_release);
+    state.note_vr_present_begin.store(nullptr, std::memory_order_release);
+    state.vr_create_instance.store(nullptr, std::memory_order_release);
+    state.vr_create_device.store(nullptr, std::memory_order_release);
+    state.vr_note_device_destroyed.store(nullptr, std::memory_order_release);
+    state.vr_note_queue.store(nullptr, std::memory_order_release);
+    state.vr_record_image.store(nullptr, std::memory_order_release);
+    state.vr_record_image_view.store(nullptr, std::memory_order_release);
+    state.vr_record_framebuffer.store(nullptr, std::memory_order_release);
+    state.vr_record_render_pass.store(nullptr, std::memory_order_release);
+    state.vr_note_destroy_image.store(nullptr, std::memory_order_release);
+    state.vr_note_destroy_image_view.store(nullptr, std::memory_order_release);
+    state.vr_note_destroy_framebuffer.store(nullptr,
+                                            std::memory_order_release);
+    state.vr_note_render_pass_begin.store(nullptr, std::memory_order_release);
+    state.vr_note_present.store(nullptr, std::memory_order_release);
     state.note_vulkan_call_begin.store(nullptr, std::memory_order_release);
     state.note_vulkan_call_end.store(nullptr, std::memory_order_release);
     g_vulkan_call_observation_active.store(false, std::memory_order_release);
@@ -1339,8 +1547,20 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateDevice(
     }
   }
 
-  const VkResult result =
-      host_create(physical_device, &host_info, allocator, device);
+  VkResult result = VK_ERROR_INITIALIZATION_FAILED;
+  bool vr_handled = false;
+  const auto vr_create_device =
+      State().vr_create_device.load(std::memory_order_acquire);
+  if (vr_create_device != nullptr) {
+    // The XR backend creates the device through xrCreateVulkanDeviceKHR and
+    // binds the OpenXR session to it; falling back afterwards would create a
+    // second, XR-incompatible device, so the hook result is final.
+    vr_handled = vr_create_device(physical_device, &host_info, allocator,
+                                  device, &result);
+  }
+  if (!vr_handled) {
+    result = host_create(physical_device, &host_info, allocator, device);
+  }
   if (result != VK_SUCCESS) {
     return result;
   }
@@ -1402,6 +1622,13 @@ VKAPI_ATTR void VKAPI_CALL
 vkDestroyDevice(VkDevice device, const VkAllocationCallbacks* allocator) {
   const auto host_destroy = reinterpret_cast<PFN_vkDestroyDevice>(
       HostDeviceProc(device, "vkDestroyDevice"));
+  const auto vr_note_device_destroyed =
+      State().vr_note_device_destroyed.load(std::memory_order_acquire);
+  if (vr_note_device_destroyed != nullptr) {
+    // Runs while the device is still valid so the XR backend can destroy
+    // its session and swapchain resources first.
+    vr_note_device_destroyed(device);
+  }
   State().text_overlay.DestroyDevice(device);
   if (host_destroy != nullptr) {
     host_destroy(device, allocator);
@@ -1423,6 +1650,11 @@ VKAPI_ATTR void VKAPI_CALL vkGetDeviceQueue(VkDevice device,
     RegisterHostQueueBinding(device, *queue);
     (void)State().text_overlay.RegisterQueue(device, *queue, queue_family_index,
                                              queue_index);
+    const auto vr_note_queue =
+        State().vr_note_queue.load(std::memory_order_acquire);
+    if (vr_note_queue != nullptr) {
+      vr_note_queue(device, *queue, queue_family_index, queue_index);
+    }
   }
 }
 
@@ -1438,6 +1670,12 @@ VKAPI_ATTR void VKAPI_CALL vkGetDeviceQueue2(
     RegisterHostQueueBinding(device, *queue);
     (void)State().text_overlay.RegisterQueue(
         device, *queue, queue_info->queueFamilyIndex, queue_info->queueIndex);
+    const auto vr_note_queue =
+        State().vr_note_queue.load(std::memory_order_acquire);
+    if (vr_note_queue != nullptr) {
+      vr_note_queue(device, *queue, queue_info->queueFamilyIndex,
+                    queue_info->queueIndex);
+    }
   }
 }
 
@@ -2023,6 +2261,148 @@ vkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* present_info) {
   }
   observation.SetResult(normalized_result);
   return normalized_result;
+}
+
+// ---- VR backend resource provenance wrappers -------------------------------
+// Thin pass-throughs to the host dispatch with optional notifications for the
+// experimental OpenXR backend. Creation/destruction calls are rare; the only
+// per-frame entry (vkCmdBeginRenderPass) costs one atomic load and stops
+// doing work once both eye bindings are established.
+
+VKAPI_ATTR VkResult VKAPI_CALL vkCreateImage(
+    VkDevice device, const VkImageCreateInfo* create_info,
+    const VkAllocationCallbacks* allocator, VkImage* image) {
+  const PFN_vkCreateImage host_create =
+      HostDispatchForDevice(device).create_image;
+  if (host_create == nullptr) {
+    return VK_ERROR_INITIALIZATION_FAILED;
+  }
+  const VkResult result = host_create(device, create_info, allocator, image);
+  const auto record = State().vr_record_image.load(std::memory_order_acquire);
+  if (result == VK_SUCCESS && record != nullptr) {
+    record(device, *image, create_info);
+  }
+  return result;
+}
+
+VKAPI_ATTR void VKAPI_CALL vkDestroyImage(VkDevice device, VkImage image,
+                                          const VkAllocationCallbacks* allocator) {
+  const auto note = State().vr_note_destroy_image.load(std::memory_order_acquire);
+  if (note != nullptr && image != VK_NULL_HANDLE) {
+    note(image);
+  }
+  const PFN_vkDestroyImage host_destroy =
+      HostDispatchForDevice(device).destroy_image;
+  if (host_destroy != nullptr) {
+    host_destroy(device, image, allocator);
+  }
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL vkCreateImageView(
+    VkDevice device, const VkImageViewCreateInfo* create_info,
+    const VkAllocationCallbacks* allocator, VkImageView* view) {
+  const PFN_vkCreateImageView host_create =
+      HostDispatchForDevice(device).create_image_view;
+  if (host_create == nullptr) {
+    return VK_ERROR_INITIALIZATION_FAILED;
+  }
+  const VkResult result = host_create(device, create_info, allocator, view);
+  const auto record =
+      State().vr_record_image_view.load(std::memory_order_acquire);
+  if (result == VK_SUCCESS && record != nullptr && create_info != nullptr) {
+    record(*view, create_info->image);
+  }
+  return result;
+}
+
+VKAPI_ATTR void VKAPI_CALL
+vkDestroyImageView(VkDevice device, VkImageView image_view,
+                   const VkAllocationCallbacks* allocator) {
+  const auto note =
+      State().vr_note_destroy_image_view.load(std::memory_order_acquire);
+  if (note != nullptr && image_view != VK_NULL_HANDLE) {
+    note(image_view);
+  }
+  const PFN_vkDestroyImageView host_destroy =
+      HostDispatchForDevice(device).destroy_image_view;
+  if (host_destroy != nullptr) {
+    host_destroy(device, image_view, allocator);
+  }
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL vkCreateFramebuffer(
+    VkDevice device, const VkFramebufferCreateInfo* create_info,
+    const VkAllocationCallbacks* allocator, VkFramebuffer* framebuffer) {
+  const PFN_vkCreateFramebuffer host_create =
+      HostDispatchForDevice(device).create_framebuffer;
+  if (host_create == nullptr) {
+    return VK_ERROR_INITIALIZATION_FAILED;
+  }
+  const VkResult result = host_create(device, create_info, allocator, framebuffer);
+  const auto record =
+      State().vr_record_framebuffer.load(std::memory_order_acquire);
+  if (result == VK_SUCCESS && record != nullptr) {
+    record(*framebuffer, create_info);
+  }
+  return result;
+}
+
+VKAPI_ATTR void VKAPI_CALL
+vkDestroyFramebuffer(VkDevice device, VkFramebuffer framebuffer,
+                     const VkAllocationCallbacks* allocator) {
+  const auto note =
+      State().vr_note_destroy_framebuffer.load(std::memory_order_acquire);
+  if (note != nullptr && framebuffer != VK_NULL_HANDLE) {
+    note(framebuffer);
+  }
+  const PFN_vkDestroyFramebuffer host_destroy =
+      HostDispatchForDevice(device).destroy_framebuffer;
+  if (host_destroy != nullptr) {
+    host_destroy(device, framebuffer, allocator);
+  }
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL vkCreateRenderPass(
+    VkDevice device, const VkRenderPassCreateInfo* create_info,
+    const VkAllocationCallbacks* allocator, VkRenderPass* render_pass) {
+  const PFN_vkCreateRenderPass host_create =
+      HostDispatchForDevice(device).create_render_pass;
+  if (host_create == nullptr) {
+    return VK_ERROR_INITIALIZATION_FAILED;
+  }
+  const VkResult result = host_create(device, create_info, allocator, render_pass);
+  const auto record =
+      State().vr_record_render_pass.load(std::memory_order_acquire);
+  if (result == VK_SUCCESS && record != nullptr) {
+    record(*render_pass, create_info);
+  }
+  return result;
+}
+
+VKAPI_ATTR void VKAPI_CALL
+vkDestroyRenderPass(VkDevice device, VkRenderPass render_pass,
+                    const VkAllocationCallbacks* allocator) {
+  const PFN_vkDestroyRenderPass host_destroy =
+      HostDispatchForDevice(device).destroy_render_pass;
+  if (host_destroy != nullptr) {
+    host_destroy(device, render_pass, allocator);
+  }
+}
+
+VKAPI_ATTR void VKAPI_CALL
+vkCmdBeginRenderPass(VkCommandBuffer command_buffer,
+                     const VkRenderPassBeginInfo* begin_info,
+                     VkSubpassContents contents) {
+  const auto note =
+      State().vr_note_render_pass_begin.load(std::memory_order_acquire);
+  if (note != nullptr) {
+    note(command_buffer, begin_info);
+  }
+  const PFN_vkCmdBeginRenderPass host_begin =
+      HostDispatchForCommandBuffer(command_buffer).cmd_begin_render_pass;
+  if (host_begin != nullptr) {
+    host_begin(command_buffer, begin_info, contents);
+  }
 }
 
 }  // extern "C"

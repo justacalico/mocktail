@@ -15,6 +15,11 @@
 namespace mocktail {
 namespace runtime {
 
+#ifndef MOCKTAIL_VR_DEFAULT_ENABLED
+#define MOCKTAIL_VR_DEFAULT_ENABLED 0
+#endif
+inline constexpr bool kDefaultVrEnabled = MOCKTAIL_VR_DEFAULT_ENABLED != 0;
+
 enum class GraphicsBackend {
   kAuto,
   kSystem,
@@ -137,7 +142,7 @@ class RuntimeConfig {
 
  private:
   bool headless_ = false;
-  bool vr_enabled_ = false;
+  bool vr_enabled_ = kDefaultVrEnabled;
   bool vr_valid_ = true;
   std::filesystem::path roblox_library_path_ = "rbx_bin/libroblox.so";
   GraphicsBackend graphics_backend_ = GraphicsBackend::kVulkan;

@@ -62,6 +62,11 @@ bool MergeRuntimeClientSettingsOverrides(const FrameRatePolicy& frame_rate,
                                          std::string* merged_json,
                                          std::string* error);
 
+// The resolved VR mode owns this flag in both client-settings channels.
+bool MergeVrClientSettingsOverrides(bool enabled, std::string_view base_json,
+                                    std::string* merged_json,
+                                    std::string* error);
+
 // Keeps the legacy test bypass disabled. The host PermissionsProtocol now
 // answers microphone authorization from capture configuration. No permission
 // query opens a recording device.

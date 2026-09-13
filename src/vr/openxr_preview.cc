@@ -301,8 +301,7 @@ class Preview {
         " failed: " + (text[0] ? std::string(text) : std::to_string(result));
     if (result == XR_ERROR_RUNTIME_UNAVAILABLE)
       message += ". No active OpenXR runtime was found. Start WiVRn for a real "
-                 "headset. Without a headset, run mocktail-vr-simulated from "
-                 "this build directory.";
+                 "headset, or select an installed runtime using XR_RUNTIME_JSON.";
     else if (result == XR_ERROR_FORM_FACTOR_UNAVAILABLE)
       message += ". Connect a headset or select a simulated runtime.";
     else if (result == XR_ERROR_EXTENSION_NOT_PRESENT)

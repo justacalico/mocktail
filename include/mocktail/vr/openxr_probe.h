@@ -43,6 +43,10 @@ ProbeReport ProbeOpenXr();
 std::string FormatProbeReport(const ProbeReport& report);
 int ProbeExitCode(ProbeStatus status);
 
+// False in builds configured without MOCKTAIL_ENABLE_VR; --vr fails closed
+// early in that case instead of starting Roblox without VR support.
+bool IsOpenXrSupportCompiled();
+
 }  // namespace mocktail::vr
 
 #endif  // MOCKTAIL_VR_OPENXR_PROBE_H_

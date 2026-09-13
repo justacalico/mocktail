@@ -73,6 +73,8 @@ XrResult EnumerateProperties(XrStructureType type, Enumerate enumerate,
 
 }  // namespace
 
+bool IsOpenXrSupportCompiled() { return true; }
+
 ProbeReport ProbeOpenXr() {
   ProbeReport report;
   report.sdk_version = Version(XR_CURRENT_API_VERSION);

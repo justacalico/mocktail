@@ -99,7 +99,7 @@ TEST(RuntimeConfigBootstrapTest, CreatesCompletePrivateFirstRunFile) {
       LoadRuntimeConfig(MapEnvironment(), file);
   ASSERT_TRUE(loaded) << loaded.error;
   EXPECT_TRUE(loaded.file_loaded);
-  EXPECT_FALSE(loaded.config.vr_enabled());
+  EXPECT_EQ(loaded.config.vr_enabled(), kDefaultVrEnabled);
   EXPECT_EQ(loaded.config.graphics_backend(), GraphicsBackend::kVulkan);
   EXPECT_EQ(loaded.config.theme_mode(), "roblox");
   EXPECT_EQ(loaded.config.frame_rate().mode, FrameRateLimitMode::kUnmanaged);
@@ -156,12 +156,12 @@ TEST(RuntimeConfigFileTest, ExportsResolvedVrStateAndRejectsInvalidState) {
   EXPECT_TRUE(ExportRuntimeConfigEnvironment(
       RuntimeConfig::FromEnvironment(MapEnvironment()), &error))
       << error;
-  EXPECT_STREQ(std::getenv("MOCKTAIL_VR_ENABLED"), "0");
+  EXPECT_STREQ(std::getenv("MOCKTAIL_VR_ENABLED"), kDefaultVrEnabled ? "1" : "0");
   EXPECT_FALSE(ExportRuntimeConfigEnvironment(
       RuntimeConfig::FromEnvironment(
           MapEnvironment({{"MOCKTAIL_VR_ENABLED", "invalid"}})),
       &error));
-  EXPECT_STREQ(std::getenv("MOCKTAIL_VR_ENABLED"), "0");
+  EXPECT_STREQ(std::getenv("MOCKTAIL_VR_ENABLED"), kDefaultVrEnabled ? "1" : "0");
   if (saved)
     setenv("MOCKTAIL_VR_ENABLED", saved->c_str(), 1);
   else

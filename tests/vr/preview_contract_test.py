@@ -137,5 +137,5 @@ with tempfile.TemporaryDirectory(prefix="mocktail-xr-preview-") as directory:
                             capture_output=True, text=True, timeout=5)
     assert result.returncode == 1, result
     assert "XR_ERROR_RUNTIME_UNAVAILABLE" in result.stdout, result.stdout
-    assert "mocktail-vr-simulated" in result.stdout, result.stdout
-    print("missing runtime diagnostic offers simulator: passed")
+    assert "XR_RUNTIME_JSON" in result.stdout, result.stdout
+    print("missing runtime diagnostic explains runtime selection: passed")

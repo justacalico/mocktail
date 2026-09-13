@@ -23,6 +23,9 @@
 #include "mocktail/audio/fmod_jni_audio_bridge.h"
 #include "mocktail/audio/webrtc_jni_audio_bridge.h"
 #include "mocktail/audio/roblox_output_device_bridge.h"
+#include "mocktail/vr/openxr_backend.h"
+#include "mocktail/vr/openxr_probe.h"
+#include "mocktail/vr/roblox_vr_device_bridge.h"
 #include "runtime/auth_runtime_composition.h"
 #include "runtime/command_line.h"
 #include "runtime/crash_report_policy.h"
@@ -332,11 +335,28 @@ int main(int argc, char* argv[]) {
     return EXIT_FAILURE;
   }
   // The standalone OpenXR scene belongs to mocktail-vr-probe --scene.
-  // Continue through Roblox startup to inspect its native VR device.
+  // --vr continues through Roblox startup as a native stereo prototype.
   if (runtime_config.config.vr_enabled()) {
-    std::cerr << "  [vr] Roblox VR initialization requested (experimental); "
-                 "stereo eye resources and OpenXR output are not yet connected. "
-                 "Standalone scene: mocktail-vr-probe --scene\n";
+    if (!mocktail::vr::IsOpenXrSupportCompiled()) {
+      std::cerr << "  [vr] This build does not include OpenXR support. "
+                   "Use a VR-enabled build of Mocktail; refusing to start "
+                   "Roblox with --vr in a non-VR build.\n";
+      return EXIT_FAILURE;
+    }
+    const mocktail::vr::VrBackendMode vr_backend_mode =
+        mocktail::vr::ResolveVrBackendMode(true);
+    std::cerr << "  [vr] experimental backend="
+              << mocktail::vr::VrBackendModeName(vr_backend_mode)
+              << ": Roblox renders both eyes through its DebugDeviceVR "
+                 "debug device (exact Build ID 2998 only)";
+    if (vr_backend_mode == mocktail::vr::VrBackendMode::kXrOutput) {
+      std::cerr << "; eye images are submitted to the active OpenXR runtime "
+                   "as a projection layer. Start WiVRn and connect the headset "
+                   "before launching.\n";
+    } else {
+      std::cerr << "; OpenXR output is disabled in this diagnostic mode "
+                   "(MOCKTAIL_VR_BACKEND=native).\n";
+    }
   }
   mocktail::runtime::SessionLog session_log;
   mocktail::runtime::FailureSupportBundleGuard support_bundle_guard(
@@ -755,6 +775,12 @@ int main(int argc, char* argv[]) {
                 << command_line_error << '\n';
       return EXIT_FAILURE;
     }
+    if (!mocktail::runtime::MergeVrClientSettingsOverrides(
+            runtime_config.config.vr_enabled(), audio_capture_overrides,
+            &audio_capture_overrides, &command_line_error)) {
+      std::cerr << "[FATAL] Cannot apply VR policy: " << command_line_error << '\n';
+      return EXIT_FAILURE;
+    }
     if (setenv("MOCKTAIL_CLIENT_SETTINGS_OVERRIDES_JSON",
                audio_capture_overrides.c_str(), 1) != 0) {
       std::cerr << "[FATAL] Cannot export runtime client-settings policy\n";
@@ -768,6 +794,12 @@ int main(int argc, char* argv[]) {
             &fast_flags_overrides, &command_line_error)) {
       std::cerr << "[FATAL] Cannot apply crash-report fast-flags policy: "
                 << command_line_error << '\n';
+      return EXIT_FAILURE;
+    }
+    if (!mocktail::runtime::MergeVrClientSettingsOverrides(
+            runtime_config.config.vr_enabled(), fast_flags_overrides,
+            &fast_flags_overrides, &command_line_error)) {
+      std::cerr << "[FATAL] Cannot apply VR policy: " << command_line_error << '\n';
       return EXIT_FAILURE;
     }
     if (setenv("MOCKTAIL_FAST_FLAGS_JSON", fast_flags_overrides.c_str(), 1) !=
@@ -828,6 +860,8 @@ int main(int argc, char* argv[]) {
 
   mocktail::runtime::RobloxFullscreenRuntimeBridge fullscreen_bridge;
   mocktail::audio::RobloxOutputDeviceBridge output_device_bridge;
+  mocktail::vr::RobloxVrDeviceBridge vr_device_bridge;
+  mocktail::vr::OpenXrBackend xr_backend;
   if (command_line.options.mode == mocktail::runtime::CommandMode::kRun) {
     const std::string compatibility_manifest =
         environment.GetOr("MOCKTAIL_COMPATIBILITY_MANIFEST",
@@ -854,6 +888,31 @@ int main(int argc, char* argv[]) {
       std::cerr << "[FATAL] Cannot install Roblox output-device bridge: "
                 << output_device_status.message() << '\n';
       return EXIT_FAILURE;
+    }
+    if (runtime_config.config.vr_enabled()) {
+      if (mocktail::vr::ResolveVrBackendMode(true) ==
+          mocktail::vr::VrBackendMode::kXrOutput) {
+        // Fail closed and loudly when no OpenXR runtime is reachable; the
+        // native-stereo diagnostic mode must be requested explicitly.
+        const mocktail::Status xr_status = xr_backend.Arm();
+        if (!xr_status.ok()) {
+          std::cerr << "[FATAL] Cannot arm the OpenXR backend for --vr: "
+                    << xr_status.message() << '\n'
+                    << "  Start WiVRn, connect your headset, then run mocktail -vr again.\n"
+                    << "  For a custom runtime set XR_RUNTIME_JSON to its manifest.\n"
+                    << "  Set MOCKTAIL_VR_BACKEND=native for the "
+                       "native-stereo diagnostic mode without a runtime.\n";
+          return EXIT_FAILURE;
+        }
+      }
+      const mocktail::Status vr_device_status =
+          vr_device_bridge.Install(compatibility.profile);
+      if (!vr_device_status.ok()) {
+        std::cerr << "[FATAL] Cannot install experimental Roblox VR device "
+                     "bridge: "
+                  << vr_device_status.message() << '\n';
+        return EXIT_FAILURE;
+      }
     }
   }
 
@@ -1046,6 +1105,8 @@ int main(int argc, char* argv[]) {
                               std::to_string(runtime_status) + ".");
   }
   support_bundle_guard.SetExitCode(runtime_status);
+  xr_backend.Disarm();
+  vr_device_bridge.Shutdown();
   output_device_bridge.Shutdown();
   fullscreen_bridge.Shutdown();
   memory_limit_watchdog.Stop();

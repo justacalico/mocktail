@@ -67,12 +67,16 @@ graphics:
   # Optional presentation synchronization override: auto, on, or off.
   # vsync: off
 
-vr:
-  # Boolean (default: false): launch the Roblox experimental VR path.
-  # Only Build ID 2998 is currently accepted; eye resources and OpenXR output
-  # are NOT yet connected. Standalone scene: mocktail-vr-probe --scene.
-  # Use --no-vr to launch Roblox normally.
-  enabled: false
+# vr:
+  # Boolean (default: enabled in VR builds, disabled in non-VR builds).
+  # Experimental VR for the exact Build ID 2998
+  # payload. Mocktail initializes the guest DebugDeviceVR eye resources (two
+  # distinct 500x500 eye framebuffers), the Roblox renderer draws both eyes
+  # every frame, and the frames are submitted to the active OpenXR runtime as
+  # a stereo projection layer with head pose (runtime-tracked, or scripted for
+  # desktop testing). Controllers are NOT connected yet. Standalone OpenXR
+  # test scene: mocktail-vr-probe --scene. Use --no-vr to launch normally.
+  # enabled: false
 
 performance:
   # Boolean (default: false): size Roblox scheduler/render queues from every

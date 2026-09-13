@@ -3,11 +3,23 @@
 
 include_guard(GLOBAL)
 
-option(MOCKTAIL_ENABLE_VR "Build experimental native OpenXR support" OFF)
+option(MOCKTAIL_ENABLE_VR "Build experimental native OpenXR support (VR branch default)" ON)
 
-add_library(mocktail_vr STATIC src/vr/diagnostics.cc)
+add_library(mocktail_vr STATIC
+  src/vr/diagnostics.cc
+  src/vr/openxr_backend_mode.cc
+  src/vr/vr_perf.cc
+  src/vr/vr_mirror.cc
+  src/vr/roblox_vr_device_bridge.cc)
 add_library(Mocktail::VR ALIAS mocktail_vr)
 target_include_directories(mocktail_vr PUBLIC "${CMAKE_SOURCE_DIR}/include")
+target_include_directories(mocktail_vr PRIVATE "${CMAKE_SOURCE_DIR}/src")
+target_link_libraries(mocktail_vr PUBLIC Vulkan::Headers)
+# shm_open for the desktop eye mirror lives in librt on glibc.
+find_library(MOCKTAIL_RT_LIBRARY rt)
+if(MOCKTAIL_RT_LIBRARY)
+  target_link_libraries(mocktail_vr PUBLIC ${MOCKTAIL_RT_LIBRARY})
+endif()
 mocktail_apply_compile_options(mocktail_vr)
 
 if(MOCKTAIL_ENABLE_VR)
@@ -34,11 +46,12 @@ if(MOCKTAIL_ENABLE_VR)
       "${CMAKE_BINARY_DIR}/third_party/OpenXR-SDK" EXCLUDE_FROM_ALL)
   endfunction()
   mocktail_add_openxr_sdk()
-  target_sources(mocktail_vr PRIVATE src/vr/openxr_probe.cc src/vr/openxr_preview.cc)
-  # Error unwinding is confined to this native session implementation; its
-  # public entry point catches errors before returning to the guest runtime.
-  set_source_files_properties(src/vr/openxr_preview.cc PROPERTIES
-    COMPILE_OPTIONS -fexceptions)
+  target_sources(mocktail_vr PRIVATE src/vr/openxr_probe.cc src/vr/openxr_preview.cc
+    src/vr/openxr_backend.cc)
+  # Error unwinding is confined to these native session implementations; their
+  # public entry points catch errors before returning to the guest runtime.
+  set_source_files_properties(src/vr/openxr_preview.cc src/vr/openxr_backend.cc
+    PROPERTIES COMPILE_OPTIONS -fexceptions)
   target_compile_definitions(mocktail_vr PRIVATE XR_USE_GRAPHICS_API_VULKAN)
   target_link_libraries(mocktail_vr PRIVATE OpenXR::openxr_loader Vulkan::Headers ${CMAKE_DL_LIBS})
 else()
@@ -50,11 +63,3 @@ set_target_properties(mocktail_vr_probe PROPERTIES OUTPUT_NAME mocktail-vr-probe
 target_link_libraries(mocktail_vr_probe PRIVATE Mocktail::VR)
 mocktail_apply_compile_options(mocktail_vr_probe)
 install(TARGETS mocktail_vr_probe RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
-
-# Development launcher for an independently built Monado runtime. --prepare
-# keeps its shared library and a relative manifest under this build directory.
-configure_file("${CMAKE_SOURCE_DIR}/scripts/vr_simulated.py"
-  "${CMAKE_BINARY_DIR}/mocktail-vr-simulated" COPYONLY)
-file(CHMOD "${CMAKE_BINARY_DIR}/mocktail-vr-simulated"
-  PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE
-    WORLD_READ WORLD_EXECUTE)
