@@ -1020,8 +1020,7 @@ bool Init(int width, int height, const char* title) {
 
   ConfigureGraphicsBackendBeforeSDL();
 
-  if (StringEquals(GetEnvNonEmpty("MOCKTAIL_GRAPHICS_BACKEND"),
-                   "direct-vulkan")) {
+  if (ShouldUseNativeVulkanBackend()) {
     if (!SDL_Init(SDL_INIT_VIDEO)) {
       fprintf(stderr, "  [window] SDL_Init failed: %s\n", SDL_GetError());
       return false;
