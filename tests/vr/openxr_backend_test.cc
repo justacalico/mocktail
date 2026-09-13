@@ -10,6 +10,7 @@ struct VrBridgeTestAccess {
 };
 }
 struct OpenXrBackendTestAccess {
+  static size_t DesktopCount(const OpenXrBackend& b) { return b.desktop_swapchains_.size(); }
   template<class T> static T Handle(std::uintptr_t n) { return reinterpret_cast<T>(n); }
   static void Configure(OpenXrBackend& backend) {
     backend.vk_instance_ = Handle<VkInstance>(1);
@@ -189,3 +190,27 @@ TEST(OpenXrBackendLifecycle, TeardownClearsCantedRejectionLatch) {
   EXPECT_FALSE(Access::CantedLogged(b));
 }
 }  // namespace mocktail::vr
+
+namespace mocktail::vr {
+TEST(OpenXrDesktopMirror, RequiresTransferUsageAndDropsDestroyedSwapchain) {
+  OpenXrBackend b;
+  OpenXrBackendTestAccess::Configure(b);
+  const auto device = OpenXrBackendTestAccess::Handle<VkDevice>(2);
+  const auto chain = OpenXrBackendTestAccess::Handle<VkSwapchainKHR>(20);
+  const auto image = OpenXrBackendTestAccess::Handle<VkImage>(21);
+  VkSwapchainCreateInfoKHR info{};
+  info.imageArrayLayers = 1;
+  info.imageExtent = {800, 600};
+  info.imageFormat = VK_FORMAT_B8G8R8A8_UNORM;
+  b.RecordDesktopSwapchain(device, chain, &info, &image, 1);
+  EXPECT_EQ(OpenXrBackendTestAccess::DesktopCount(b), 0u);
+  info.imageUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+  b.RecordDesktopSwapchain(device, chain, &info, &image, 1);
+  EXPECT_EQ(OpenXrBackendTestAccess::DesktopCount(b), 1u);
+  b.RecordDesktopSwapchain(device, chain, nullptr, nullptr, 0);
+  EXPECT_EQ(OpenXrBackendTestAccess::DesktopCount(b), 0u);
+  b.RecordDesktopSwapchain(OpenXrBackendTestAccess::Handle<VkDevice>(3), chain, &info, &image, 1);
+  EXPECT_EQ(OpenXrBackendTestAccess::DesktopCount(b), 0u);
+  EXPECT_EQ(b.MirrorDesktop(VK_NULL_HANDLE, nullptr), VK_NOT_READY);
+}
+}

@@ -76,6 +76,12 @@ XR_RUNTIME_JSON="/path/to/SteamVR/steamxr_linux64.json" ./build/mocktail --vr
 to the OpenXR loader. The default `auto` uses the server detection described above, then registered
 and installed runtimes. Selection affects only this process.
 
+Vulkan VR mirrors the left eye into the desktop Roblox window using a GPU
+blit, preserving its aspect ratio. DebugDeviceVR otherwise leaves that window
+black even when the headset receives eye images. Set
+`MOCKTAIL_VR_DESKTOP_MIRROR=0` to disable this copy. This is a view of the eye,
+not a separate desktop camera or a replacement for VR menu input.
+
 ## OpenGL ES
 
 The `opengl`/`system` renderer uses the guest's real EGL/OpenGL ES context:

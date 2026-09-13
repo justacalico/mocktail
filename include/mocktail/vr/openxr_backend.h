@@ -141,6 +141,11 @@ class OpenXrBackend final {
 
   // Render-thread frame cycle at host present begin.
   void NoteHostPresent(VkQueue queue, VkDevice device);
+  void RecordDesktopSwapchain(VkDevice device, VkSwapchainKHR swapchain,
+      const VkSwapchainCreateInfoKHR* info, const VkImage* images, unsigned count);
+  // On success the original present semaphores have been consumed and the
+  // copy has completed. The caller must present with no wait semaphores.
+  VkResult MirrorDesktop(VkQueue queue, const VkPresentInfoKHR* info);
 
   // Pose published for the frame that is about to render. The device bridge
   // reads it once per frame on the render thread and injects it into the
@@ -273,6 +278,12 @@ class OpenXrBackend final {
   VrMirror mirror_;
 
   std::unordered_map<VkImage, ImageRecord> images_;
+  struct DesktopSwapchain {
+    VkExtent2D extent;
+    VkFormat format;
+    std::vector<VkImage> images;
+  };
+  std::unordered_map<VkSwapchainKHR, DesktopSwapchain> desktop_swapchains_;
   std::unordered_map<VkImageView, VkImage> image_views_;
   std::unordered_map<VkFramebuffer, std::vector<VkImageView>> framebuffer_views_;
   std::unordered_map<VkFramebuffer, VkRenderPass> framebuffer_render_pass_;

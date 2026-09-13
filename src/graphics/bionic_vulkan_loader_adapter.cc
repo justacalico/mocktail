@@ -1689,6 +1689,16 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateSwapchainKHR(
     return VK_ERROR_INITIALIZATION_FAILED;
   }
   VkSwapchainCreateInfoKHR host_info = *create_info;
+  static const auto vr_desktop_enabled = ResolveProcessFunction<bool (*)()>("mocktail_vr_desktop_enabled");
+  if (vr_desktop_enabled && vr_desktop_enabled()) {
+    PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR caps;
+    { std::lock_guard<std::mutex> lock(State().mutex); caps = State().host_surface_capabilities; }
+    VkSurfaceCapabilitiesKHR supported{};
+    if (caps && caps(HostDispatchForDevice(device).physical_device, host_info.surface,
+                     &supported) == VK_SUCCESS &&
+        (supported.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_DST_BIT))
+      host_info.imageUsage |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+  }
   const mocktail::graphics::PresentModePolicy present_policy =
       mocktail::graphics::CachedPresentModePolicy();
   if (present_policy != mocktail::graphics::PresentModePolicy::kHostDefault) {
@@ -1773,6 +1783,9 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateSwapchainKHR(
       host_get_images(device, *swapchain, &image_count, images.data());
   if (images_result == VK_SUCCESS || images_result == VK_INCOMPLETE) {
     images.resize(image_count);
+    static const auto record = ResolveProcessFunction<void (*)(VkDevice, VkSwapchainKHR,
+        const VkSwapchainCreateInfoKHR*, const VkImage*, unsigned)>("mocktail_vr_desktop_swapchain");
+    if (record) record(device, *swapchain, &host_info, images.data(), image_count);
     (void)State().text_overlay.RegisterSwapchain(
         device, *swapchain, *create_info, images.data(), image_count);
   }
@@ -1784,6 +1797,9 @@ vkDestroySwapchainKHR(VkDevice device, VkSwapchainKHR swapchain,
                       const VkAllocationCallbacks* allocator) {
   const auto host_destroy = reinterpret_cast<PFN_vkDestroySwapchainKHR>(
       HostDeviceProc(device, "vkDestroySwapchainKHR"));
+  static const auto record = ResolveProcessFunction<void (*)(VkDevice, VkSwapchainKHR,
+      const VkSwapchainCreateInfoKHR*, const VkImage*, unsigned)>("mocktail_vr_desktop_swapchain");
+  if (record) record(device, swapchain, nullptr, nullptr, 0);
   State().text_overlay.DestroySwapchain(device, swapchain);
   if (host_destroy != nullptr) {
     host_destroy(device, swapchain, allocator);
@@ -2238,6 +2254,19 @@ vkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* present_info) {
   if (host_present == nullptr) {
     observation.SetResult(VK_ERROR_INITIALIZATION_FAILED);
     return VK_ERROR_INITIALIZATION_FAILED;
+  }
+  static const auto mirror = ResolveProcessFunction<VkResult (*)(VkQueue, const VkPresentInfoKHR*)>(
+      "mocktail_vr_desktop_present");
+  VkPresentInfoKHR mirrored{};
+  if (mirror && present_info) {
+    const VkResult mirror_result = mirror(queue, present_info);
+    if (mirror_result < 0) return mirror_result;
+    if (mirror_result == VK_SUCCESS) {
+      mirrored = *present_info;
+      mirrored.waitSemaphoreCount = 0;
+      mirrored.pWaitSemaphores = nullptr;
+      present_info = &mirrored;
+    }
   }
   const VkResult result = state.text_overlay.QueuePresent(
       queue, present_info, ObservedHostQueuePresent);

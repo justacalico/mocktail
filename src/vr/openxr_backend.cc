@@ -152,6 +152,8 @@ struct OpenXrBackend::VkProcs {
   PFN_vkCmdPipelineBarrier CmdPipelineBarrier = nullptr;
   PFN_vkCmdCopyImage CmdCopyImage = nullptr;
   PFN_vkCmdBlitImage CmdBlitImage = nullptr;
+  PFN_vkCmdClearColorImage CmdClearColorImage = nullptr;
+  PFN_vkGetPhysicalDeviceFormatProperties GetPhysicalDeviceFormatProperties = nullptr;
   PFN_vkCreateFence CreateFence = nullptr;
   PFN_vkDestroyFence DestroyFence = nullptr;
   PFN_vkResetFences ResetFences = nullptr;
@@ -585,6 +587,7 @@ void OpenXrBackend::SetupDeviceAfterCreationLocked(
     MOCKTAIL_BACKEND_VK_FN(CmdPipelineBarrier)
     MOCKTAIL_BACKEND_VK_FN(CmdCopyImage)
     MOCKTAIL_BACKEND_VK_FN(CmdBlitImage)
+    MOCKTAIL_BACKEND_VK_FN(CmdClearColorImage)
     MOCKTAIL_BACKEND_VK_FN(CreateFence)
     MOCKTAIL_BACKEND_VK_FN(DestroyFence)
     MOCKTAIL_BACKEND_VK_FN(ResetFences)
@@ -599,6 +602,7 @@ void OpenXrBackend::SetupDeviceAfterCreationLocked(
     MOCKTAIL_BACKEND_VK_INSTANCE_FN(GetPhysicalDeviceMemoryProperties)
     MOCKTAIL_BACKEND_VK_INSTANCE_FN(GetPhysicalDeviceQueueFamilyProperties)
     MOCKTAIL_BACKEND_VK_INSTANCE_FN(GetPhysicalDeviceProperties)
+    MOCKTAIL_BACKEND_VK_INSTANCE_FN(GetPhysicalDeviceFormatProperties)
 #undef MOCKTAIL_BACKEND_VK_INSTANCE_FN
 
     VkPhysicalDeviceProperties device_properties{};
@@ -1050,6 +1054,7 @@ void OpenXrBackend::TeardownSessionLocked(const char* reason, bool preserve_devi
   session_recovery_pending_ = false;
   next_session_retry_ns_ = 0;
   images_.clear();
+  desktop_swapchains_.clear();
   image_views_.clear();
   framebuffer_views_.clear();
   framebuffer_render_pass_.clear();
@@ -2185,6 +2190,106 @@ MirrorVkProcs OpenXrBackend::MirrorProcs() const {
   return procs;
 }
 
+// DebugDeviceVR renders offscreen eyes but does not mirror them to the host
+// window. Keep this copy on the guest GPU; no readback or image files in normal use.
+void OpenXrBackend::RecordDesktopSwapchain(VkDevice device, VkSwapchainKHR swapchain,
+    const VkSwapchainCreateInfoKHR* info, const VkImage* images, unsigned count) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  desktop_swapchains_.erase(swapchain);
+  if (!device || device != vk_device_ || !info || !images || !count ||
+      !(info->imageUsage & VK_IMAGE_USAGE_TRANSFER_DST_BIT) ||
+      info->imageArrayLayers != 1 || info->imageSharingMode != VK_SHARING_MODE_EXCLUSIVE)
+    return;
+  desktop_swapchains_[swapchain] = {info->imageExtent, info->imageFormat,
+                                    {images, images + count}};
+}
+
+VkResult OpenXrBackend::MirrorDesktop(VkQueue queue, const VkPresentInfoKHR* info) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (EnvString("MOCKTAIL_VR_DESKTOP_MIRROR", "1") == "0" ||
+      !vk_ || !info || info->swapchainCount != 1 ||
+      !info->pSwapchains || !info->pImageIndices || !eyes_[0].valid ||
+      !eyes_[0].image || (info->waitSemaphoreCount && !info->pWaitSemaphores) ||
+      !queue_families_.count(queue) || queue_families_[queue] != vk_queue_family_)
+    return VK_NOT_READY;
+  const auto found = desktop_swapchains_.find(info->pSwapchains[0]);
+  if (found == desktop_swapchains_.end() ||
+      info->pImageIndices[0] >= found->second.images.size()) return VK_NOT_READY;
+  const auto& target = found->second;
+  VkFormatProperties source_properties{}, target_properties{};
+  vk_->GetPhysicalDeviceFormatProperties(vk_physical_device_, eyes_[0].format, &source_properties);
+  vk_->GetPhysicalDeviceFormatProperties(vk_physical_device_, target.format, &target_properties);
+  if (!(source_properties.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_SRC_BIT) ||
+      !(target_properties.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_DST_BIT)) return VK_NOT_READY;
+  std::string error;
+  if (!EnsureCopyResources(vk_device_, vk_queue_family_, &error)) return VK_NOT_READY;
+  if (vk_->ResetCommandBuffer(copy_command_, 0) != VK_SUCCESS) return VK_NOT_READY;
+  VkCommandBufferBeginInfo begin{};
+  begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+  begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+  if (vk_->BeginCommandBuffer(copy_command_, &begin) != VK_SUCCESS) return VK_NOT_READY;
+  VkImageMemoryBarrier barriers[2]{};
+  for (auto& b : barriers) {
+    b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    b.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT;
+  }
+  barriers[0].image = eyes_[0].image;
+  barriers[0].oldLayout = eyes_[0].final_layout;
+  barriers[0].newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+  barriers[0].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+  barriers[1].image = target.images[info->pImageIndices[0]];
+  barriers[1].oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+  barriers[1].newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+  barriers[1].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+  vk_->CmdPipelineBarrier(copy_command_, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+      VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 2, barriers);
+  const VkClearColorValue black{{0.f, 0.f, 0.f, 1.f}};
+  vk_->CmdClearColorImage(copy_command_, barriers[1].image, barriers[1].newLayout,
+      &black, 1, &barriers[1].subresourceRange);
+  VkMemoryBarrier clear_barrier{};
+  clear_barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+  clear_barrier.srcAccessMask = clear_barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+  vk_->CmdPipelineBarrier(copy_command_, VK_PIPELINE_STAGE_TRANSFER_BIT,
+      VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &clear_barrier, 0, nullptr, 0, nullptr);
+  const double scale = std::min(double(target.extent.width) / eyes_[0].width,
+                                double(target.extent.height) / eyes_[0].height);
+  const int width = std::max(1, int(eyes_[0].width * scale));
+  const int height = std::max(1, int(eyes_[0].height * scale));
+  const int x = (int(target.extent.width) - width) / 2;
+  const int y = (int(target.extent.height) - height) / 2;
+  VkImageBlit region{};
+  region.srcSubresource = region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+  region.srcOffsets[1] = {static_cast<int>(eyes_[0].width), static_cast<int>(eyes_[0].height), 1};
+  region.dstOffsets[0] = {x, y, 0};
+  region.dstOffsets[1] = {x + width, y + height, 1};
+  vk_->CmdBlitImage(copy_command_, barriers[0].image, barriers[0].newLayout,
+      barriers[1].image, barriers[1].newLayout, 1, &region, VK_FILTER_NEAREST);
+  for (auto& b : barriers) {
+    std::swap(b.oldLayout, b.newLayout);
+    b.srcAccessMask = b.dstAccessMask;
+    b.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT;
+  }
+  vk_->CmdPipelineBarrier(copy_command_, VK_PIPELINE_STAGE_TRANSFER_BIT,
+      VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 2, barriers);
+  if (vk_->EndCommandBuffer(copy_command_) != VK_SUCCESS ||
+      vk_->ResetFences(vk_device_, 1, &copy_fence_) != VK_SUCCESS) return VK_NOT_READY;
+  std::vector<VkPipelineStageFlags> stages(info->waitSemaphoreCount, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+  VkSubmitInfo submit{};
+  submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+  submit.waitSemaphoreCount = info->waitSemaphoreCount;
+  submit.pWaitSemaphores = info->pWaitSemaphores;
+  submit.pWaitDstStageMask = stages.data();
+  submit.commandBufferCount = 1;
+  submit.pCommandBuffers = &copy_command_;
+  VkResult result = vk_->QueueSubmit(queue, 1, &submit, copy_fence_);
+  if (result != VK_SUCCESS) return result;
+  // Once submitted, never fall back to waiting on the consumed semaphores.
+  result = vk_->WaitForFences(vk_device_, 1, &copy_fence_, VK_TRUE, UINT64_MAX);
+  return result;
+}
+
 // Diagnostic only: read BOTH images on the guest queue while the XR image is
 // still acquired. Never read a released image owned by the compositor.
 bool OpenXrBackend::CaptureEyeEvidence(VkQueue queue, int eye) {
@@ -2421,6 +2526,28 @@ void mocktail_vr_xr_note_render_pass_begin(VkCommandBuffer command_buffer,
   auto* backend = mocktail::vr::ActiveVrBackend();
   if (backend != nullptr) {
     backend->NoteRenderPassBegin(command_buffer, info);
+  }
+}
+
+bool mocktail_vr_desktop_enabled() {
+  return mocktail::vr::ActiveVrBackend() != nullptr;
+}
+void mocktail_vr_desktop_swapchain(VkDevice device, VkSwapchainKHR swapchain,
+    const VkSwapchainCreateInfoKHR* info, const VkImage* images, unsigned count) {
+  try {
+    if (auto* backend = mocktail::vr::ActiveVrBackend())
+      backend->RecordDesktopSwapchain(device, swapchain, info, images, count);
+  } catch (const std::exception& error) {
+    std::fprintf(stderr, "  [vr-backend] desktop swapchain registration failed: %s\n", error.what());
+  }
+}
+VkResult mocktail_vr_desktop_present(VkQueue queue, const VkPresentInfoKHR* info) {
+  try {
+    if (auto* backend = mocktail::vr::ActiveVrBackend()) return backend->MirrorDesktop(queue, info);
+    return VK_NOT_READY;
+  } catch (const std::exception& error) {
+    std::fprintf(stderr, "  [vr-backend] desktop mirror failed: %s\n", error.what());
+    return VK_ERROR_OUT_OF_HOST_MEMORY;
   }
 }
 
