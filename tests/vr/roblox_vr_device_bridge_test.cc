@@ -501,3 +501,148 @@ TEST(VrPoseBridge, InvalidTrackingAndNonfiniteValuesNeverBecomeValid) {
   EXPECT_FALSE(internal::ApplyXrPose(state.data(), pose));
 }
 }  // namespace mocktail::vr
+
+namespace mocktail::vr {
+TEST(VrHandPoseBridge, ValidGripPosesFillBothHandRecordsInMetres) {
+  std::array<std::uint8_t, internal::kStateCopySize> state;
+  state.fill(0xa5);
+  ScriptedPoseSample pose;
+  pose.valid = true;
+  pose.orientation[3] = 1.f;
+  pose.hands[0].grip_valid = true;
+  pose.hands[0].grip_position[0] = -0.25f;
+  pose.hands[0].grip_position[1] = 1.0f;
+  pose.hands[0].grip_orientation[1] = std::sin(0.3f);
+  pose.hands[0].grip_orientation[3] = std::cos(0.3f);
+  pose.hands[1].grip_valid = true;
+  pose.hands[1].grip_position[0] = 0.25f;
+  pose.hands[1].grip_orientation[3] = 1.f;
+  ASSERT_TRUE(internal::ApplyXrPose(state.data(), pose));
+  // Left hand record at copy+0x40 (UserCFrame index 1), right at +0x60 (2).
+  EXPECT_EQ(state[internal::kLeftHandRecordOffset], 1);
+  EXPECT_EQ(state[internal::kRightHandRecordOffset], 1);
+  // The unused extra record (index 3) must stay invalid.
+  EXPECT_EQ(state[internal::kExtraRecordOffset], 0);
+  float left_pos[3], left_ori[4], right_pos[3];
+  std::memcpy(left_pos, state.data() + internal::kLeftHandRecordOffset +
+                            internal::kRecordPositionOffset, 12);
+  std::memcpy(left_ori, state.data() + internal::kLeftHandRecordOffset +
+                            internal::kRecordOrientationOffset, 16);
+  std::memcpy(right_pos, state.data() + internal::kRightHandRecordOffset +
+                             internal::kRecordPositionOffset, 12);
+  // Metres only: the guest's 0x37eacb8 applies the 10/3 stud conversion.
+  EXPECT_FLOAT_EQ(left_pos[0], -0.25f);
+  EXPECT_FLOAT_EQ(left_pos[1], 1.0f);
+  EXPECT_FLOAT_EQ(left_ori[1], std::sin(0.3f));
+  EXPECT_FLOAT_EQ(left_ori[3], std::cos(0.3f));
+  EXPECT_FLOAT_EQ(right_pos[0], 0.25f);
+}
+
+TEST(VrHandPoseBridge, UntrackedOrNonFiniteHandsStayInvalidWithoutTouchingHead) {
+  std::array<std::uint8_t, internal::kStateCopySize> state;
+  state.fill(0);
+  ScriptedPoseSample pose;
+  pose.valid = true;
+  pose.orientation[3] = 1.f;
+  // Left hand untracked (grip_valid false), right hand has a NaN quaternion.
+  pose.hands[0].grip_valid = false;
+  pose.hands[1].grip_valid = true;
+  pose.hands[1].grip_orientation[0] = std::numeric_limits<float>::quiet_NaN();
+  ASSERT_TRUE(internal::ApplyXrPose(state.data(), pose));
+  EXPECT_EQ(state[0], 1);  // head still applied
+  EXPECT_EQ(state[internal::kLeftHandRecordOffset], 0);
+  EXPECT_EQ(state[internal::kRightHandRecordOffset], 0);
+  // A non-normalized quaternion must also be rejected.
+  pose.hands[1].grip_orientation[0] = 0.f;
+  pose.hands[1].grip_orientation[3] = 0.5f;
+  ASSERT_TRUE(internal::ApplyXrPose(state.data(), pose));
+  EXPECT_EQ(state[internal::kRightHandRecordOffset], 0);
+}
+
+TEST(VrHandPoseBridge, LosingTrackingClearsHandValidByteNotWholeRecord) {
+  std::array<std::uint8_t, internal::kStateCopySize> state;
+  state.fill(0);
+  ScriptedPoseSample pose;
+  pose.valid = true;
+  pose.orientation[3] = 1.f;
+  pose.hands[0].grip_valid = true;
+  pose.hands[0].grip_orientation[3] = 1.f;
+  ASSERT_TRUE(internal::ApplyXrPose(state.data(), pose));
+  ASSERT_EQ(state[internal::kLeftHandRecordOffset], 1);
+  // Tracking lost: valid byte clears so the guest reports untracked; the stale
+  // pose bytes remain but are unreachable while valid==0 (no teleport to origin).
+  pose.hands[0].grip_valid = false;
+  ASSERT_TRUE(internal::ApplyXrPose(state.data(), pose));
+  EXPECT_EQ(state[internal::kLeftHandRecordOffset], 0);
+  float stale[3];
+  std::memcpy(stale, state.data() + internal::kLeftHandRecordOffset +
+                        internal::kRecordPositionOffset, 12);
+  EXPECT_FLOAT_EQ(stale[0], 0.f);  // position was never written for this hand
+}
+}  // namespace mocktail::vr
+
+namespace mocktail::vr {
+TEST(VrNativeController, StateCopyPublishesChannelsAndHapticsWithoutChangingReadiness) {
+  std::array<std::uint8_t, internal::kStateCopySize> state{};
+  state[0x133] = 77;
+  ScriptedPoseSample pose;
+  pose.valid = pose.controllers_connected = true;
+  pose.controller_channels[3] = .7f;
+  pose.controller_channels[11] = -1.f;
+  pose.controller_channels[24] = 1.f;
+  ASSERT_TRUE(internal::ApplyXrPose(state.data(), pose));
+  EXPECT_EQ(state[0x80], 1);
+  EXPECT_EQ(state[0x132], 1);
+  EXPECT_EQ(state[0x133], 77);
+  float trigger, y, x;
+  std::memcpy(&trigger, state.data() + 0x88 + 3*4, 4);
+  std::memcpy(&y, state.data() + 0x88 + 11*4, 4);
+  std::memcpy(&x, state.data() + 0x88 + 24*4, 4);
+  EXPECT_FLOAT_EQ(trigger, .7f);
+  EXPECT_FLOAT_EQ(y, -1.f);
+  EXPECT_FLOAT_EQ(x, 1.f);
+  pose.valid = false;
+  EXPECT_FALSE(internal::ApplyXrPose(state.data(), pose));
+  EXPECT_EQ(state[0x80], 0);
+  EXPECT_EQ(state[0x132], 0);
+  std::memcpy(&trigger, state.data() + 0x88 + 3*4, 4);
+  EXPECT_FLOAT_EQ(trigger, 0);
+}
+TEST(VrAimPointer, CorrectsOnlyPointerAndAppliesTranslationScaleOnce) {
+  float frame[12] = {1,0,0, 0,1,0, 0,0,1, 10,20,30};
+  VrHandPose hand;
+  hand.grip_valid = hand.aim_valid = true;
+  hand.aim_position[0] = .3f;
+  hand.aim_orientation[1] = std::sin(.3f);
+  hand.aim_orientation[3] = std::cos(.3f);
+  ASSERT_TRUE(internal::ApplyAimToWorldFrame(frame, hand, 2, 0));
+  EXPECT_NEAR(frame[9], 12, 1e-5);
+  EXPECT_FLOAT_EQ(frame[10], 20);
+  EXPECT_NEAR(frame[0], std::cos(.6f), 1e-5);
+  EXPECT_NEAR(frame[2], std::sin(.6f), 1e-5);
+  EXPECT_FLOAT_EQ(hand.grip_orientation[3], 1);
+}
+TEST(VrAimPointer, CancelsNativeHandPitchWithoutChangingWorldOrigin) {
+  const float a = -.3490658504f;
+  float frame[12] = {1,0,0, 0,std::cos(a),-std::sin(a), 0,std::sin(a),std::cos(a), 10,20,30};
+  VrHandPose hand;
+  hand.grip_valid = hand.aim_valid = true;
+  ASSERT_TRUE(internal::ApplyAimToWorldFrame(frame, hand, 1, -20));
+  EXPECT_NEAR(frame[0], 1, 1e-5);
+  EXPECT_NEAR(frame[5], 0, 1e-5);
+  EXPECT_NEAR(frame[8], 1, 1e-5);
+  EXPECT_FLOAT_EQ(frame[9], 10);
+}
+TEST(VrAimPointer, InvalidAimOrScaleKeepsOriginalFrame) {
+  const std::array<float,12> original{1,0,0, 0,1,0, 0,0,1, 10,20,30};
+  auto frame = original;
+  VrHandPose hand;
+  EXPECT_FALSE(internal::ApplyAimToWorldFrame(frame.data(), hand, 1, 0));
+  EXPECT_EQ(frame, original);
+  hand.grip_valid = hand.aim_valid = true;
+  EXPECT_FALSE(internal::ApplyAimToWorldFrame(frame.data(), hand, -1, 0));
+  hand.aim_orientation[0] = std::numeric_limits<float>::quiet_NaN();
+  EXPECT_FALSE(internal::ApplyAimToWorldFrame(frame.data(), hand, 1, 0));
+  EXPECT_EQ(frame, original);
+}
+}

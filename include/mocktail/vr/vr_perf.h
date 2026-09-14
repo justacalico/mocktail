@@ -24,6 +24,7 @@ enum class Stage {
   kCopyFenceWait,
   kMirrorPublish,
   kEvidence,
+  kControllerSync,
   kStageCount,
 };
 
@@ -45,6 +46,7 @@ enum class Counter {
   kVisibilityLost,
   kVisibilityGained,
   kFramesInvalidated,
+  kControllerSyncs,
   kCounterCount,
 };
 

@@ -6826,6 +6826,12 @@ int mocktail::legacy::Run(const runtime::CommandLineOptions& options,
     while (true) {
       const uint64_t fps_tick_start_ns = fps_trace ? MonotonicNanos() : 0;
       const bool keep_window_open = mocktail::window::PumpEvents();
+      // Deliver XR tracked-controller input on the same thread and through the
+      // same router as SDL input, once per loop iteration after the SDL pump.
+      // Inert in non-VR builds or while no OpenXR controller layer is active.
+      if (window_input_runtime != nullptr) {
+        window_input_runtime->DrainXrControllers();
+      }
       game_surface_events_completed = drain_game_surface_events();
       const uint64_t fps_after_sdl_ns = fps_trace ? MonotonicNanos() : 0;
       if (!game_surface_events_completed || !keep_window_open) {

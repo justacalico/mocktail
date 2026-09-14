@@ -10,6 +10,7 @@ add_library(mocktail_vr STATIC
   src/vr/openxr_backend_mode.cc
   src/vr/vr_perf.cc
   src/vr/vr_mirror.cc
+  src/vr/xr_controller.cc
   src/vr/roblox_vr_device_bridge.cc)
 add_library(Mocktail::VR ALIAS mocktail_vr)
 target_include_directories(mocktail_vr PUBLIC "${CMAKE_SOURCE_DIR}/include")
@@ -47,17 +48,19 @@ if(MOCKTAIL_ENABLE_VR)
   endfunction()
   mocktail_add_openxr_sdk()
   target_sources(mocktail_vr PRIVATE src/vr/openxr_probe.cc src/vr/openxr_preview.cc
-    src/vr/openxr_backend.cc src/vr/gles_transport.cc)
+    src/vr/openxr_backend.cc src/vr/gles_transport.cc src/vr/xr_actions.cc)
   # Error unwinding is confined to these native session implementations; their
   # public entry points catch errors before returning to the guest runtime.
   set_source_files_properties(src/vr/openxr_preview.cc src/vr/openxr_backend.cc
+    src/vr/xr_actions.cc
     PROPERTIES COMPILE_OPTIONS -fexceptions)
   target_compile_definitions(mocktail_vr PRIVATE XR_USE_GRAPHICS_API_VULKAN)
   set_source_files_properties(src/vr/openxr_backend.cc PROPERTIES COMPILE_DEFINITIONS "XR_USE_GRAPHICS_API_OPENGL_ES;XR_USE_PLATFORM_EGL")
   target_include_directories(mocktail_vr PRIVATE ${MOCKTAIL_EGL_INCLUDE_DIR} ${MOCKTAIL_GLES3_INCLUDE_DIR})
   target_link_libraries(mocktail_vr PRIVATE OpenXR::openxr_loader Vulkan::Headers ${CMAKE_DL_LIBS})
 else()
-  target_sources(mocktail_vr PRIVATE src/vr/openxr_disabled.cc)
+  target_sources(mocktail_vr PRIVATE src/vr/openxr_disabled.cc
+    src/vr/xr_actions_disabled.cc)
 endif()
 
 add_executable(mocktail_vr_probe src/vr/probe_main.cc)

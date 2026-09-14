@@ -11,6 +11,7 @@
 #include <cinttypes>
 #include <cmath>
 #include "mocktail/vr/openxr_backend.h"
+#include "mocktail/vr/vr_pose_math.h"
 #include <cstdarg>
 #include <cstddef>
 #include <cstdint>
@@ -50,6 +51,137 @@ thread_local void *g_eye_object = nullptr;
 thread_local void *g_eye_framebuffer = nullptr;
 thread_local int g_eye_index = -1;
 thread_local bool g_thread_presented = false;
+std::mutex g_native_pose_mutex;
+ScriptedPoseSample g_native_pose;
+using PointerFrameFn = void *(*)(void *, void *);
+std::atomic<PointerFrameFn> g_pointer_original{nullptr};
+constexpr std::uintptr_t kPointerFrameRva = 0x4d573ee;
+// Whole instructions, no RIP-relative operands. 2998's sret prologue.
+constexpr std::array<unsigned char, 15> kPointerPrologue = {
+    0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56,
+    0x41, 0x54, 0x53, 0x48, 0x83, 0xec, 0x70};
+std::uintptr_t g_pointer_target = 0;
+
+void AbsoluteJump(unsigned char *code, std::uintptr_t target) {
+  const unsigned char opcode[6] = {0xff, 0x25, 0, 0, 0, 0};
+  std::memcpy(code, opcode, 6);
+  std::memcpy(code + 6, &target, 8);
+}
+
+extern "C" void *mocktail_vr_pointer_frame(void *result, void *service) {
+  auto original = g_pointer_original.load(std::memory_order_acquire);
+  if (!original)
+    return result;
+  original(result, service);
+  auto *bridge = g_active_bridge.load(std::memory_order_acquire);
+  if (!bridge || !bridge->active()) return result;
+  ScriptedPoseSample native_pose;
+  {
+    std::lock_guard<std::mutex> lock(g_native_pose_mutex);
+    native_pose = g_native_pose;
+  }
+  if (!native_pose.valid) return result;
+  auto *backend = ActiveVrBackend();
+  if (!backend)
+    return result;
+  const auto current = backend->PublishedHeadPose();
+  if (!current.valid)
+    return result;
+  int index = 0;
+  std::memcpy(&index, static_cast<unsigned char *>(service) + 0x118, 4);
+  if (index != 1 && index != 2)
+    return result;
+  if (!current.hands[index - 1].aim_valid)
+    return result;
+  const auto &hand = native_pose.hands[index - 1];
+  if (!hand.grip_valid || !hand.aim_valid)
+    return result;
+  const auto base = bridge->image_base();
+  // Same camera lookup as the original getter (see pointer-world-2998.asm).
+  auto get_workspace = reinterpret_cast<void *(*)(void *)>(base + 0x263778c);
+  void *workspace = get_workspace(service);
+  if (!workspace)
+    return result;
+  auto *vtable = *static_cast<std::uintptr_t **>(workspace);
+  void *camera =
+      reinterpret_cast<void *(*)(void *)>(vtable[0x3a8 / 8])(workspace);
+  if (!camera)
+    return result;
+  float scale = 0;
+  int degrees = 0;
+  std::memcpy(&scale, static_cast<unsigned char *>(camera) + 0x140, 4);
+  std::memcpy(&degrees, reinterpret_cast<void *>(base + 0x73677a8), 4);
+  if (internal::ApplyAimToWorldFrame(static_cast<float *>(result), hand, scale,
+                                     -static_cast<float>(degrees))) {
+    static std::atomic<bool> logged[2]{};
+    if (!logged[index - 1].exchange(true))
+      std::fprintf(
+          stderr, "  [vr-input] native menu pointer uses OpenXR aim: hand=%d\n",
+          index - 1);
+  }
+  return result;
+}
+
+bool SetCodeWritable(std::uintptr_t target, bool writable) {
+  const auto page_size = static_cast<std::uintptr_t>(sysconf(_SC_PAGESIZE));
+  if (!page_size)
+    return false;
+  const auto first = target & ~(page_size - 1);
+  const auto end =
+      (target + kPointerPrologue.size() + page_size - 1) & ~(page_size - 1);
+  return mprotect(reinterpret_cast<void *>(first), end - first,
+                  PROT_READ | PROT_EXEC | (writable ? PROT_WRITE : 0)) == 0;
+}
+
+bool InstallPointerHook(std::uintptr_t base) {
+  if (g_pointer_target)
+    return false;
+  auto *target = reinterpret_cast<unsigned char *>(base + kPointerFrameRva);
+  if (std::memcmp(target, kPointerPrologue.data(), kPointerPrologue.size()) !=
+      0)
+    return false;
+  const auto page_size = static_cast<std::size_t>(sysconf(_SC_PAGESIZE));
+  auto *code = static_cast<unsigned char *>(
+      mmap(nullptr, page_size, PROT_READ | PROT_WRITE,
+           MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+  if (code == MAP_FAILED)
+    return false;
+  std::memcpy(code, target, kPointerPrologue.size());
+  AbsoluteJump(code + kPointerPrologue.size(),
+               base + kPointerFrameRva + kPointerPrologue.size());
+  if (mprotect(code, page_size, PROT_READ | PROT_EXEC) != 0 ||
+      !SetCodeWritable(base + kPointerFrameRva, true)) {
+    munmap(code, page_size);
+    return false;
+  }
+  g_pointer_original.store(reinterpret_cast<PointerFrameFn>(code),
+                           std::memory_order_release);
+  AbsoluteJump(target,
+               reinterpret_cast<std::uintptr_t>(&mocktail_vr_pointer_frame));
+  target[14] = 0x90;
+  if (!SetCodeWritable(base + kPointerFrameRva, false)) {
+    std::memcpy(target, kPointerPrologue.data(), kPointerPrologue.size());
+    (void)SetCodeWritable(base + kPointerFrameRva, false);
+    return false;
+  }
+  // Retain this single RX page for process lifetime: an in-flight guest call
+  // may still be returning through it when the entrypoint is restored.
+  g_pointer_target = base + kPointerFrameRva;
+  return true;
+}
+
+bool RestorePointerHook() {
+  if (!g_pointer_target)
+    return true;
+  if (!SetCodeWritable(g_pointer_target, true))
+    return false;
+  std::memcpy(reinterpret_cast<void *>(g_pointer_target),
+              kPointerPrologue.data(), kPointerPrologue.size());
+  const bool restored = SetCodeWritable(g_pointer_target, false);
+  if (restored)
+    g_pointer_target = 0;
+  return restored;
+}
 
 Status InvalidArgument(std::string message) {
   return Status::Error(StatusCode::kInvalidArgument, std::move(message));
@@ -339,6 +471,11 @@ namespace {
 // result buffer, rsi = device object, returns the buffer) and the eye getter
 // takes (rdi = device object, esi = eye index) and returns the framebuffer
 // object pointer.
+extern "C" void mocktail_vr_debug_device_haptics(void* object, int hand, float amplitude) {
+  if (auto* bridge = g_active_bridge.load(std::memory_order_acquire))
+    bridge->OnHapticsCall(object, hand, amplitude);
+}
+
 extern "C" void *mocktail_vr_debug_device_state_getter(void *result_buffer,
                                                        void *device_object) {
   RobloxVrDeviceBridge *bridge =
@@ -408,6 +545,8 @@ Status RobloxVrDeviceBridge::Install(const compat::BuildProfile &profile) {
         "experimental Roblox VR requires vr_debug_device_bridge metadata in "
         "the exact-build compatibility profile");
   }
+  if (profile.elf_build_id != "ade08266c67aee88ec9c1d00902150e1684dad3a")
+    return FailedPrecondition("VR controller/pointer/haptic contracts are verified only for Build 2998");
   if (!profile.allow_host_abi_bridges) {
     return FailedPrecondition(
         "Roblox VR device bridge profile requires host ABI bridges");
@@ -507,14 +646,25 @@ Status RobloxVrDeviceBridge::Activate(std::uintptr_t image_base) {
         "match the profile");
   }
 
+  if (!IsExecutableImageRange(image_base, kPointerFrameRva, 0x1b2) ||
+      std::memcmp(reinterpret_cast<void*>(image_base + kPointerFrameRva),
+                  kPointerPrologue.data(), kPointerPrologue.size()) != 0)
+    return FailedPrecondition("2998 VR pointer function contract mismatch");
   image_base_.store(image_base, std::memory_order_relaxed);
   image_size_.store(ImageSize(image_base), std::memory_order_relaxed);
   vtable_ =
       reinterpret_cast<std::uintptr_t *>(image_base + profile_.vtable_rva);
+  // 2998's haptic sink is a verified no-op (ret at 0x1d48b70).
+  // The caller at 0x28a767e passes self, hand 0/1 and float amplitude.
+  if (vtable_[3] != image_base + 0x1d48b70 ||
+      !IsExecutableImageRange(image_base, 0x1d48b70, 1) ||
+      *reinterpret_cast<const unsigned char*>(image_base + 0x1d48b70) != 0xc3)
+    { vtable_ = nullptr; return FailedPrecondition("2998 VR haptic vtable contract mismatch"); }
+  original_haptic_slot_ = vtable_[3];
   original_state_slot_ = vtable_[kStateGetterVtableSlot / sizeof(void *)];
   original_eye_slot_ = vtable_[kEyeGetterVtableSlot / sizeof(void *)];
 
-  std::uintptr_t *first_slot = vtable_ + kStateGetterVtableSlot / 8;
+  std::uintptr_t *first_slot = vtable_ + 3;
   std::uintptr_t *last_slot_exclusive =
       vtable_ + kEyeInitializerVtableSlot / 8 + 1;
   if (!SetVtableRangeWritable(first_slot, last_slot_exclusive, true)) {
@@ -527,6 +677,7 @@ Status RobloxVrDeviceBridge::Activate(std::uintptr_t image_base) {
       std::memory_order_release);
   original_eye_getter_.store(reinterpret_cast<EyeGetterFn>(original_eye_slot_),
                              std::memory_order_release);
+  __atomic_store_n(&vtable_[3], FunctionAddress(&mocktail_vr_debug_device_haptics), __ATOMIC_RELEASE);
   __atomic_store_n(&vtable_[kStateGetterVtableSlot / 8],
                    FunctionAddress(&mocktail_vr_debug_device_state_getter),
                    __ATOMIC_RELEASE);
@@ -534,6 +685,7 @@ Status RobloxVrDeviceBridge::Activate(std::uintptr_t image_base) {
                    FunctionAddress(&mocktail_vr_debug_device_eye_getter),
                    __ATOMIC_RELEASE);
   if (!SetVtableRangeWritable(first_slot, last_slot_exclusive, false)) {
+    __atomic_store_n(&vtable_[3], original_haptic_slot_, __ATOMIC_RELEASE);
     __atomic_store_n(&vtable_[kStateGetterVtableSlot / 8], original_state_slot_,
                      __ATOMIC_RELEASE);
     __atomic_store_n(&vtable_[kEyeGetterVtableSlot / 8], original_eye_slot_,
@@ -547,8 +699,16 @@ Status RobloxVrDeviceBridge::Activate(std::uintptr_t image_base) {
                          "protection");
   }
 
+  if (!InstallPointerHook(image_base)) {
+    (void)RestoreVtableLocked();
+    return FailedPrecondition("could not install verified VR aim pointer hook");
+  }
+  {
+    std::lock_guard<std::mutex> pose_lock(g_native_pose_mutex);
+    g_native_pose = {};
+  }
   active_.store(true, std::memory_order_release);
-  Log("  [vr-device] activated: DebugDeviceVR vtable slots +0x28/+0x48 "
+  Log("  [vr-device] activated: DebugDeviceVR input/eyes/haptics +0x18/+0x28/+0x48 and aim pointer "
       "interposed at image base 0x%" PRIxPTR "\n",
       image_base);
   return Status::Ok();
@@ -583,15 +743,17 @@ void RobloxVrDeviceBridge::Shutdown() {
 }
 
 bool RobloxVrDeviceBridge::RestoreVtableLocked() {
+  if (!RestorePointerHook()) return false;
   if (vtable_ == nullptr) {
     return false;
   }
-  std::uintptr_t *first_slot = vtable_ + kStateGetterVtableSlot / 8;
+  std::uintptr_t *first_slot = vtable_ + 3;
   std::uintptr_t *last_slot_exclusive =
       vtable_ + kEyeInitializerVtableSlot / 8 + 1;
   if (!SetVtableRangeWritable(first_slot, last_slot_exclusive, true)) {
     return false;
   }
+  __atomic_store_n(&vtable_[3], original_haptic_slot_, __ATOMIC_RELEASE);
   __atomic_store_n(&vtable_[kStateGetterVtableSlot / 8], original_state_slot_,
                    __ATOMIC_RELEASE);
   __atomic_store_n(&vtable_[kEyeGetterVtableSlot / 8], original_eye_slot_,
@@ -662,34 +824,169 @@ void *RobloxVrDeviceBridge::ValidatedGraphicsDevice(void *self) const {
   return device;
 }
 
-bool internal::ApplyXrPose(void* state, const ScriptedPoseSample& pose) {
-  if (!state) return false;
-  auto* bytes = static_cast<std::uint8_t*>(state);
-  bytes[0] = 0;
-  // No tracked controllers are supplied by this backend.
-  bytes[0x20] = bytes[0x40] = bytes[0x60] = 0;
-  if (!pose.valid) return false;
-  float norm = 0;
-  for (float v : pose.orientation) { if (!std::isfinite(v)) return false; norm += v*v; }
-  if (norm < 0.99f || norm > 1.01f) return false;
-  for (float v : pose.position) if (!std::isfinite(v)) return false;
-  for (int eye = 0; eye < 2; ++eye) {
-    for (float v : pose.eye_offset[eye]) if (!std::isfinite(v)) return false;
-    for (float v : pose.eye_fov[eye])
-      if (!std::isfinite(v) || std::abs(v) >= 1.56f) return false;
+bool internal::ApplyAimToWorldFrame(float *frame, const VrHandPose &hand,
+                                    float head_scale, float degrees) {
+  if (!frame || !hand.grip_valid || !hand.aim_valid ||
+      !std::isfinite(head_scale) || head_scale <= 0 ||
+      !std::isfinite(degrees) || std::abs(degrees) > 360)
+    return false;
+  for (int i = 0; i < 12; ++i)
+    if (!std::isfinite(frame[i]))
+      return false;
+  for (int i = 0; i < 3; ++i)
+    if (!std::isfinite(hand.grip_position[i]) ||
+        !std::isfinite(hand.aim_position[i]))
+      return false;
+  pose::Quat grip, aim;
+  if (!pose::QuatNormalize({hand.grip_orientation[0], hand.grip_orientation[1],
+                            hand.grip_orientation[2], hand.grip_orientation[3]},
+                           &grip) ||
+      !pose::QuatNormalize({hand.aim_orientation[0], hand.aim_orientation[1],
+                            hand.aim_orientation[2], hand.aim_orientation[3]},
+                           &aim))
+    return false;
+  const float angle = degrees * pose::kPi / 360.f;
+  grip = pose::QuatMultiply(grip, {std::sin(angle), 0, 0, std::cos(angle)});
+  const auto inverse = pose::QuatConjugate(grip);
+  const auto delta = pose::QuatMultiply(inverse, aim);
+  auto translation =
+      pose::QuatRotate(inverse, {hand.aim_position[0] - hand.grip_position[0],
+                                 hand.aim_position[1] - hand.grip_position[1],
+                                 hand.aim_position[2] - hand.grip_position[2]});
+  const float scale = (10.f / 3.f) * head_scale;
+  const float offset[3] = {translation.x * scale, translation.y * scale,
+                           translation.z * scale};
+  float out[12];
+  for (int col = 0; col < 3; ++col) {
+    const auto axis =
+        pose::QuatRotate(delta, {col == 0 ? 1.f : 0.f, col == 1 ? 1.f : 0.f,
+                                 col == 2 ? 1.f : 0.f});
+    const float component[3] = {axis.x, axis.y, axis.z};
+    for (int row = 0; row < 3; ++row) {
+      out[row * 3 + col] = 0;
+      for (int k = 0; k < 3; ++k)
+        out[row * 3 + col] += frame[row * 3 + k] * component[k];
+    }
   }
+  for (int row = 0; row < 3; ++row) {
+    out[9 + row] = frame[9 + row];
+    for (int k = 0; k < 3; ++k)
+      out[9 + row] += frame[row * 3 + k] * offset[k];
+  }
+  for (float value : out)
+    if (!std::isfinite(value))
+      return false;
+  std::memcpy(frame, out, sizeof(out));
+  return true;
+}
+
+bool internal::ApplyXrPose(void *state, const ScriptedPoseSample &pose) {
+  if (!state)
+    return false;
+  auto *bytes = static_cast<std::uint8_t *>(state);
+  bytes[0] = 0;
+  bytes[0x80] = bytes[0x132] = 0;
+  const std::uint32_t changed = 0x0fffffff;
+  std::memcpy(bytes + 0x84, &changed, sizeof(changed));
+  std::memset(bytes + 0x88, 0, 28 * sizeof(float));
+  // Hand records are cleared unless a tracked grip pose is supplied below.
+  // Clearing the valid byte (never the whole record) makes the guest report
+  // the hand as untracked instead of holding a stale pose. The extra index-3
+  // record is unused by this backend and stays invalid.
+  bytes[kExtraRecordOffset + kRecordValidOffset] = 0;
+  bytes[kLeftHandRecordOffset + kRecordValidOffset] = 0;
+  bytes[kRightHandRecordOffset + kRecordValidOffset] = 0;
+  if (!pose.valid)
+    return false;
+  float norm = 0;
+  for (float v : pose.orientation) {
+    if (!std::isfinite(v))
+      return false;
+    norm += v * v;
+  }
+  if (norm < 0.99f || norm > 1.01f)
+    return false;
+  for (float v : pose.position)
+    if (!std::isfinite(v))
+      return false;
+  for (int eye = 0; eye < 2; ++eye) {
+    for (float v : pose.eye_offset[eye])
+      if (!std::isfinite(v))
+        return false;
+    for (float v : pose.eye_fov[eye])
+      if (!std::isfinite(v) || std::abs(v) >= 1.56f)
+        return false;
+  }
+  bytes[0x80] = pose.valid && pose.controllers_connected;
+  for (int channel = 0; channel < 28; ++channel) {
+    const float raw = pose.controller_channels[channel];
+    const float value =
+        pose.valid && pose.controllers_connected && std::isfinite(raw)
+            ? std::clamp(raw, -1.f, 1.f)
+            : 0.f;
+    std::memcpy(bytes + 0x88 + channel * 4, &value, sizeof(value));
+  }
+  bytes[0x132] = pose.valid && pose.controllers_connected;
+
   // 2998's 0x37eacb8 converts metres to studs itself (factor 10/3).
   std::memcpy(bytes + 4, pose.position, sizeof(pose.position));
   std::memcpy(bytes + 0x10, pose.orientation, sizeof(pose.orientation));
+  // Tracked hands go into the same state copy the head uses, so the guest's
+  // own conversion (10/3 studs) and -20 deg hand pitch offset apply once,
+  // exactly as they do for the head. Grip is the held-object pose; a hand
+  // without a valid grip pose stays marked untracked rather than being
+  // fabricated at the origin.
+  for (int hand = 0; hand < 2; ++hand) {
+    const auto &source = pose.hands[hand];
+    if (!source.grip_valid)
+      continue;
+    float hand_norm = 0;
+    bool finite = true;
+    for (float v : source.grip_position)
+      finite = finite && std::isfinite(v);
+    for (float v : source.grip_orientation) {
+      finite = finite && std::isfinite(v);
+      hand_norm += v * v;
+    }
+    if (!finite || hand_norm < 0.99f || hand_norm > 1.01f)
+      continue;
+    const std::size_t record =
+        hand == 0 ? kLeftHandRecordOffset : kRightHandRecordOffset;
+    std::memcpy(bytes + record + kRecordPositionOffset, source.grip_position,
+                sizeof(source.grip_position));
+    std::memcpy(bytes + record + kRecordOrientationOffset,
+                source.grip_orientation, sizeof(source.grip_orientation));
+    bytes[record + kRecordValidOffset] = 1;
+  }
   for (int eye = 0; eye < 2; ++eye) {
-    std::memcpy(bytes + 0xf8 + eye*12, pose.eye_offset[eye], 12);
-    const auto* fov = pose.eye_fov[eye];
+    std::memcpy(bytes + 0xf8 + eye * 12, pose.eye_offset[eye], 12);
+    const auto *fov = pose.eye_fov[eye];
     const float tangents[4] = {std::tan(fov[2]), -std::tan(fov[3]),
-                              -std::tan(fov[0]), std::tan(fov[1])};
-    std::memcpy(bytes + 0x110 + eye*16, tangents, sizeof(tangents));
+                               -std::tan(fov[0]), std::tan(fov[1])};
+    std::memcpy(bytes + 0x110 + eye * 16, tangents, sizeof(tangents));
   }
   bytes[0] = 1;
   return true;
+}
+
+void RobloxVrDeviceBridge::OnHapticsCall(void *device_object, int hand,
+                                         float amplitude) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!active() || !ValidateObjectHeader(device_object) || hand < 0 || hand > 1)
+    return;
+  if (auto *backend = ActiveVrBackend()) {
+    static std::atomic<bool> logged[2]{};
+    if (!logged[hand].exchange(true))
+      Log("  [vr-input] native haptic callback observed: hand=%d "
+          "amplitude=%.3f\n",
+          hand, amplitude);
+    if (!std::isfinite(amplitude) || amplitude <= 0)
+      backend->StopControllerHaptics(hand);
+    // Native pull refreshes once per engine frame. A short lease prevents a
+    // stalled or disconnected engine from leaving the controller vibrating.
+    else
+      backend->RequestControllerHaptics(hand, amplitude, 50000000, 0);
+  }
 }
 
 void RobloxVrDeviceBridge::OnStateGetterCall(void *result_buffer,
@@ -709,16 +1006,21 @@ void RobloxVrDeviceBridge::OnStateGetterCall(void *result_buffer,
   if (active_.load(std::memory_order_acquire) && result_buffer && original) {
     if (auto* backend = ActiveVrBackend()) {
       const auto pose = backend->PublishedHeadPose();
+      {
+        std::lock_guard<std::mutex> pose_lock(g_native_pose_mutex);
+        g_native_pose = pose;
+      }
       if (internal::ApplyXrPose(result_buffer, pose)) {
         backend->NotePoseApplied(device_object, pose.frame);
         static thread_local std::uint64_t last_logged = 0;
         if (pose.frame != last_logged && (pose.frame == 1 || pose.frame % 20 == 0)) {
           last_logged = pose.frame;
           Log("  [vr-device][evidence] pose-applied frame=%llu owner=%p "
-              "pos=(%.4f,%.4f,%.4f) ori=(%.4f,%.4f,%.4f,%.4f)\n",
+              "pos=(%.4f,%.4f,%.4f) ori=(%.4f,%.4f,%.4f,%.4f) hands=%d/%d input=%d\n",
               static_cast<unsigned long long>(pose.frame), device_object,
               pose.position[0], pose.position[1], pose.position[2],
-              pose.orientation[0], pose.orientation[1], pose.orientation[2], pose.orientation[3]);
+              pose.orientation[0], pose.orientation[1], pose.orientation[2], pose.orientation[3],
+              pose.hands[0].grip_valid, pose.hands[1].grip_valid, pose.controllers_connected);
         }
       }
     }
@@ -882,4 +1184,14 @@ Status NotifyRobloxVrImageLoaded(std::uintptr_t image_base) {
   return bridge->Activate(image_base);
 }
 
+bool NativeControllerInputActive() {
+  auto* bridge = g_active_bridge.load(std::memory_order_acquire);
+  return bridge && bridge->active() && ActiveVrBackend();
+}
+
 } // namespace mocktail::vr
+
+extern "C" bool mocktail_vr_native_controller_input_active() {
+  // Query through the bridge's public ownership API below.
+  return mocktail::vr::NativeControllerInputActive();
+}

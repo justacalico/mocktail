@@ -8,6 +8,8 @@ Status OpenXrBackend::Arm(VrGraphicsApi) {
   return Status::Error(StatusCode::kUnavailable, "OpenXR support is disabled in this build");
 }
 void OpenXrBackend::Disarm() {}
+void OpenXrBackend::RequestControllerHaptics(int, float, std::uint64_t, float) {}
+void OpenXrBackend::StopControllerHaptics(int) {}
 OpenXrBackend* ActiveVrBackend() { return nullptr; }
 void OpenXrBackend::NotePoseApplied(void*, std::uint64_t) {}
 ScriptedPoseSample OpenXrBackend::PublishedHeadPose() const { return {}; }

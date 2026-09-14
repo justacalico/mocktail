@@ -5,12 +5,17 @@
 #include <cstdint>
 
 #include "compat/build_profile.h"
+#include "mocktail/vr/xr_controller.h"
 
 namespace mocktail::vr { struct ScriptedPoseSample; }
 namespace mocktail::vr::internal {
 
 // Writes only a caller-owned state copy; preserves all resource readiness.
 bool ApplyXrPose(void* state, const ScriptedPoseSample& pose);
+// Adjust a world-space grip CoordinateFrame to OpenXR aim without changing
+// the engine's hand pose. Native frame layout: row-major R[9], position[3].
+bool ApplyAimToWorldFrame(float* frame, const VrHandPose& hand,
+                         float head_scale, float native_hand_pitch_degrees);
 
 // Guest ABI layout constants of RBX::Graphics::DebugDeviceVR. They are pinned
 // per exact build by the machine-code contracts below; changing payload
@@ -21,6 +26,26 @@ inline constexpr std::uint32_t kExpectedObjectType = 6;
 inline constexpr std::size_t kStateOffset = 0x14;
 inline constexpr std::size_t kStateCopySize = 0x138;
 inline constexpr std::size_t kStateReadyOffsetInCopy = 0x133;
+// Per-record pose layout inside the 0x138 state copy. Verified against 2998
+// consumer 0x28a6242 (docs/vr-agent-evidence/controller-2998): four 0x20-byte
+// records are each converted by helper 0x37eacb8 (metres->studs x10/3, quat
+// normalized) and stored via setUserCFrame 0x4d56906 at VRService+0x174+idx*0x30.
+//   copy+0x00 head      -> UserCFrame index 0
+//   copy+0x20 extra     -> index 3
+//   copy+0x40 left hand -> index 1
+//   copy+0x60 right hand-> index 2
+// Record field layout (same for head and hands): valid byte +0, position
+// (3 floats, metres) +4, quaternion xyzw (4 floats) +0x10. The guest applies
+// the 10/3 conversion and a -20 deg hand pitch offset itself; neither is
+// pre-applied here.
+inline constexpr std::size_t kPoseRecordStride = 0x20;
+inline constexpr std::size_t kHeadRecordOffset = 0x00;
+inline constexpr std::size_t kExtraRecordOffset = 0x20;
+inline constexpr std::size_t kLeftHandRecordOffset = 0x40;
+inline constexpr std::size_t kRightHandRecordOffset = 0x60;
+inline constexpr std::size_t kRecordValidOffset = 0x00;
+inline constexpr std::size_t kRecordPositionOffset = 0x04;
+inline constexpr std::size_t kRecordOrientationOffset = 0x10;
 inline constexpr std::size_t kReadyByteOffset = 0x147;
 inline constexpr std::size_t kFramebufferSlotOffset = 0x150;
 inline constexpr std::size_t kTextureSlotOffset = 0x170;

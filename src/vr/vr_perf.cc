@@ -56,6 +56,7 @@ const char* StageName(Stage stage) {
     case Stage::kCopyFenceWait: return "copy_fence_wait";
     case Stage::kMirrorPublish: return "mirror_publish";
     case Stage::kEvidence: return "evidence";
+    case Stage::kControllerSync: return "controller_sync";
     case Stage::kStageCount: break;
   }
   return "unknown";
@@ -80,6 +81,7 @@ const char* CounterName(Counter counter) {
     case Counter::kVisibilityLost: return "visibility_lost";
     case Counter::kVisibilityGained: return "visibility_gained";
     case Counter::kFramesInvalidated: return "frames_invalidated";
+    case Counter::kControllerSyncs: return "controller_syncs";
     case Counter::kCounterCount: break;
   }
   return "unknown";

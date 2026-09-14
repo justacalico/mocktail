@@ -366,6 +366,17 @@ Status OpenXrBackend::Arm(VrGraphicsApi graphics_api) {
       gl_min_version_ = requirements.minApiVersionSupported;
       gl_max_version_ = requirements.maxApiVersionSupported;
     }
+    // Controller actions are instance-level: create them once here so every
+    // session (including a recreated one) can attach without re-suggesting
+    // bindings. A failure degrades to no controller input, not to no XR.
+    std::lock_guard<std::mutex> controller_lock(controller_mutex_);
+    const Status actions_status = actions_.Create(instance);
+    actions_created_ = actions_status.ok();
+    if (!actions_created_) {
+      Log("  [vr-backend] controller actions unavailable: %s (XR output "
+          "continues without controller input)\n",
+          actions_status.message().c_str());
+    }
     armed_.store(true, std::memory_order_release);
     Log("  [vr-backend] armed: OpenXR instance/system ready; awaiting guest "
         "%s\n",
@@ -385,6 +396,9 @@ void OpenXrBackend::Disarm() {
 
 void OpenXrBackend::DisarmLocked() {
   TeardownSessionLocked("disarm");
+  { std::lock_guard<std::mutex> lock(controller_mutex_);
+    actions_.Destroy();
+    actions_created_ = false; }
   if (gles_)
     gles_->Destroy();
   delete gles_;
@@ -868,6 +882,17 @@ bool OpenXrBackend::InitializeSessionResourcesLocked(std::string *error) {
       TeardownSessionLocked("swapchain failure", session_recovery_pending_);
       return false;
     }
+    // Attach the action set to this session and create its pose spaces. A
+    // failure leaves XR output working without controller input.
+    std::lock_guard<std::mutex> controller_lock(controller_mutex_);
+    if (actions_created_) {
+      const Status attach_status =
+          actions_.Attach(xr_instance_, xr_session_, xr_local_space_);
+      if (!attach_status.ok()) {
+        Log("  [vr-backend] controller actions not attached: %s\n",
+            attach_status.message().c_str());
+      }
+    }
     recording_.store(true, std::memory_order_release);
     return true;
   } catch (const std::exception &exception) {
@@ -1019,6 +1044,9 @@ void OpenXrBackend::TeardownSessionLocked(const char* reason, bool preserve_devi
     mirror_.Close();
     DestroyCopyResources();
     DestroySwapchains();
+    // Action pose spaces belong to this session; detach before the session and
+    // its spaces go away so a recreated session attaches cleanly.
+    { std::lock_guard<std::mutex> lock(controller_mutex_); actions_.Detach(); }
     if (xr_view_space_ != nullptr) {
       (void)xrDestroySpace(static_cast<XrSpace>(xr_view_space_));
       xr_view_space_ = nullptr;
@@ -1326,6 +1354,37 @@ ScriptedPoseSample OpenXrBackend::PublishedHeadPose() const {
   return published_pose_;
 }
 
+bool OpenXrBackend::TakeControllerDelivery(ControllerDelivery* out) {
+  if (out == nullptr) {
+    return false;
+  }
+  // controller_mutex_ (never mutex_): the frame cycle holds mutex_ across
+  // xrWaitFrame runtime pacing, and this drain runs on the window thread.
+  std::lock_guard<std::mutex> lock(controller_mutex_);
+  return actions_.TakeDelivery(out);
+}
+
+ControllerSnapshot OpenXrBackend::ControllerSnapshotForFrame() const {
+  std::lock_guard<std::mutex> lock(controller_mutex_);
+  return actions_.snapshot();
+}
+
+void OpenXrBackend::RequestControllerHaptics(int hand, float amplitude,
+                                             std::uint64_t duration_ns,
+                                             float frequency_hz) {
+  std::lock_guard<std::mutex> lock(controller_mutex_);
+  if (actions_created_) {
+    actions_.RequestHaptics(hand, amplitude, duration_ns, frequency_hz);
+  }
+}
+
+void OpenXrBackend::StopControllerHaptics(int hand) {
+  std::lock_guard<std::mutex> lock(controller_mutex_);
+  if (actions_created_) {
+    actions_.StopHaptics(hand);
+  }
+}
+
 void OpenXrBackend::PollSessionEvents() {
   if (xr_instance_ == nullptr) {
     return;
@@ -1364,10 +1423,8 @@ void OpenXrBackend::PollSessionEvents() {
       continue;
     }
     if (event.type == XR_TYPE_EVENT_DATA_INTERACTION_PROFILE_CHANGED) {
-      // Controllers are out of scope; recorded so the log shows the runtime
-      // offered a profile change rather than silently ignoring it.
-      Log("  [vr-backend] interaction profile changed (controller input is not "
-          "implemented in this build)\n");
+      { std::lock_guard<std::mutex> lock(controller_mutex_); actions_.NoteProfileChanged(); }
+      Log("  [vr-backend] controller interaction profile changed\n");
       continue;
     }
     if (event.type != XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED) {
@@ -1384,6 +1441,14 @@ void OpenXrBackend::PollSessionEvents() {
 }
 
 void OpenXrBackend::HandleSessionState(int state) {
+  if (state != XR_SESSION_STATE_FOCUSED) {
+    std::lock_guard<std::mutex> lock(controller_mutex_);
+    actions_.ResetInput();
+    published_pose_.hands[0] = {};
+    published_pose_.hands[1] = {};
+    published_pose_.controllers_connected = false;
+    std::fill(std::begin(published_pose_.controller_channels), std::end(published_pose_.controller_channels), 0.f);
+  }
   switch (static_cast<XrSessionState>(state)) {
       case XR_SESSION_STATE_READY: {
         auto begin =
@@ -1897,6 +1962,44 @@ void OpenXrBackend::RunFrameCycle(VkQueue queue, VkDevice device) {
   } else {
     published_pose_.valid = false;
   }
+
+  // Sync controllers exactly once per frame at the same predicted display time
+  // used for the head/eyes, then fold the resulting hand poses into the
+  // already-published frame. This adds no second frame wait and no per-getter
+  // polling; the device bridge reads published_pose_.hands when it injects the
+  // state for this frame.
+  SyncControllersLocked(predicted_display_time);
+}
+
+void OpenXrBackend::SyncControllersLocked(std::uint64_t predicted_display_time) {
+  std::lock_guard<std::mutex> lock(controller_mutex_);
+  published_pose_.hands[0] = {};
+  published_pose_.hands[1] = {};
+  published_pose_.controllers_connected = false;
+  std::fill(std::begin(published_pose_.controller_channels), std::end(published_pose_.controller_channels), 0.f);
+  if (!actions_created_ || !actions_.attached()) {
+    return;
+  }
+  const ScopedStageTimer sync_timer(perf::Stage::kControllerSync);
+  const bool synced = actions_.Sync(xr_session_, predicted_display_time,
+                                    published_pose_.frame, 0);
+  if (!synced) {
+    // Hands were invalidated above; Sync queued the input reset.
+    return;
+  }
+  // Fold this frame's hand poses into the published sample. Only valid when
+  // the head pose for this frame is itself valid, so hands and head always
+  // describe the same predicted instant.
+  if (published_pose_.valid) {
+    published_pose_.hands[0] = actions_.hand(0);
+    published_pose_.hands[1] = actions_.hand(1);
+    published_pose_.controllers_connected = EncodeNativeControllerChannels(
+        actions_.snapshot(), published_pose_.controller_channels);
+  } else {
+    published_pose_.hands[0] = VrHandPose{};
+    published_pose_.hands[1] = VrHandPose{};
+  }
+  perf::ProcessCollector().Count(perf::Counter::kControllerSyncs);
 }
 
 bool OpenXrBackend::EnsureCopyResources(VkDevice device,
@@ -2559,6 +2662,48 @@ void mocktail_vr_xr_note_present(VkQueue queue, VkDevice device) {
 }
 
 }  // extern "C"
+
+// Controller delivery ABI consumed by the input runtime through dlsym. These
+// are defined only in the VR build; a non-VR build omits them and the consumer
+// resolves nullptr, staying inert.
+#include "mocktail/vr/xr_controller_abi.h"
+
+extern "C" int32_t
+mocktail_vr_controller_pop_delivery(MocktailVrControllerDelivery* out) {
+  if (out == nullptr) {
+    return 0;
+  }
+  auto* backend = mocktail::vr::ActiveVrBackend();
+  if (backend == nullptr) {
+    return 0;
+  }
+  // Exact native VR input owns Gamepad1 when the device bridge is active.
+  // The JNI fallback must not inject a second copy into that same device.
+  extern bool mocktail_vr_native_controller_input_active();
+  if (mocktail_vr_native_controller_input_active()) return 0;
+  mocktail::vr::ControllerDelivery delivery;
+  if (!backend->TakeControllerDelivery(&delivery)) {
+    return 0;
+  }
+  mocktail::vr::EncodeControllerDelivery(delivery, out);
+  return 1;
+}
+
+extern "C" void mocktail_vr_controller_request_haptics(int32_t hand,
+                                                       float amplitude,
+                                                       uint64_t duration_ns,
+                                                       float frequency_hz) {
+  if (auto* backend = mocktail::vr::ActiveVrBackend()) {
+    backend->RequestControllerHaptics(hand, amplitude, duration_ns,
+                                      frequency_hz);
+  }
+}
+
+extern "C" void mocktail_vr_controller_stop_haptics(int32_t hand) {
+  if (auto* backend = mocktail::vr::ActiveVrBackend()) {
+    backend->StopControllerHaptics(hand);
+  }
+}
 
 extern "C" bool mocktail_vr_attach_egl(void *display, void *config,
                                        void *context, void *egl_get_proc,

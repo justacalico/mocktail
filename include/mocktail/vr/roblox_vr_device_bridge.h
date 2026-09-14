@@ -53,6 +53,7 @@ public:
   void NoteHostPresent();
 
   // Guest-side hooks invoked by the interposed vtable stubs.
+  void OnHapticsCall(void* device_object, int hand, float amplitude);
   void OnStateGetterCall(void *result_buffer, void *device_object);
   void OnEyeGetterCall(void *device_object, int eye_index, void *framebuffer);
 
@@ -89,6 +90,7 @@ private:
   std::atomic<std::uintptr_t> image_base_{0};
   std::atomic<std::uintptr_t> image_size_{0};
   std::uintptr_t *vtable_ = nullptr;
+  std::uintptr_t original_haptic_slot_ = 0;
   std::uintptr_t original_state_slot_ = 0;
   std::uintptr_t original_eye_slot_ = 0;
   std::atomic<StateGetterFn> original_state_getter_{nullptr};

@@ -12,6 +12,8 @@
 
 #include "mocktail/status.h"
 #include "mocktail/vr/vr_mirror.h"
+#include "mocktail/vr/xr_actions.h"
+#include "mocktail/vr/xr_controller.h"
 
 namespace mocktail::vr {
 
@@ -46,11 +48,17 @@ const char* VrBackendModeName(VrBackendMode mode);
 
 // One deterministic head pose sample. Position is metres, orientation is a
 // quaternion (x, y, z, w) in the OpenXR LOCAL reference space.
+// VrHandPose (tracked controller hands) is defined in xr_controller.h.
 struct ScriptedPoseSample {
   float position[3] = {0.f, 0.f, 0.f};
   float orientation[4] = {0.f, 0.f, 0.f, 1.f};
   float eye_offset[2][3] = {};  // metres in head space
   float eye_fov[2][4] = {};  // left, right, up, down angles
+  // Index 0 = left, 1 = right (Roblox UserCFrame LeftHand/RightHand).
+  VrHandPose hands[2];
+  // Exact 2998 DebugDeviceVR input channels, published with the same pose.
+  float controller_channels[28] = {};
+  bool controllers_connected = false;
   std::uint64_t frame = 0;
   bool valid = false;
 };
@@ -150,8 +158,22 @@ class OpenXrBackend final {
   // Pose published for the frame that is about to render. The device bridge
   // reads it once per frame on the render thread and injects it into the
   // guest. valid=false until the XR session located a usable head pose.
+  // hands[0]=left, hands[1]=right carry this frame's tracked controller grip
+  // poses (metres, LOCAL space) when a controller layer is active.
   ScriptedPoseSample PublishedHeadPose() const;
   void NotePoseApplied(void* owner, std::uint64_t frame);
+
+  // Controller input delivery, consumed by the window-thread input runtime
+  // through the C ABI in xr_controller_abi.h. TakeControllerDelivery pops one
+  // batch produced by the once-per-frame action sync; it returns false when
+  // no controller layer is active or nothing is queued. The snapshot exposes
+  // the current levels for overflow resync. Haptics requests are thread-safe.
+  bool TakeControllerDelivery(ControllerDelivery* out);
+  ControllerSnapshot ControllerSnapshotForFrame() const;
+  void RequestControllerHaptics(int hand, float amplitude,
+                                std::uint64_t duration_ns, float frequency_hz);
+
+  void StopControllerHaptics(int hand);
 
   // Diagnostics.
   std::uint64_t submitted_frames() const {
@@ -203,6 +225,18 @@ class OpenXrBackend final {
                                VkDevice device,
                                const VkDeviceCreateInfo* create_info,
                                std::string* error);
+  // Session-owned controller action layer (poses, buttons, axes, haptics).
+  // Created at instance level, attached per session, detached on teardown so
+  // a replacement session never reuses stale spaces.
+  XrActions actions_;
+  bool actions_created_ = false;
+  // Shared by action sync, snapshots, haptics and lifecycle operations.
+  // Acquired after mutex_ on the render thread, but never held across
+  // xrWaitFrame; the input thread takes only this controller lock.
+  mutable std::mutex controller_mutex_;
+  // Syncs actions once per frame at the predicted display time and folds the
+  // resulting hand poses into published_pose_ before the guest renders.
+  void SyncControllersLocked(std::uint64_t predicted_display_time);
   bool InitializeGlesSessionLocked(std::string *error);
   bool InitializeSessionResourcesLocked(std::string *error);
   bool CopyGlesEyesIntoSwapchains();
