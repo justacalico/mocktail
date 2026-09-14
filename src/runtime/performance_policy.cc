@@ -385,6 +385,13 @@ bool MergeVrClientSettingsOverrides(bool enabled, std::string_view base_json,
     return false;
   }
   overrides["FFlagDebugEnableVREmulator"] = enabled ? "True" : "False";
+  if (enabled) {
+    // Roblox 2998's SurfaceController startup throttle renders at 1 Hz while
+    // waiting for AppStartRendering. Our XR frame loop is driven by guest
+    // presents, so that also stalls head/controller updates in the VR menu.
+    // Keep VR rendering continuous; leave the non-VR startup policy alone.
+    overrides["FFlagSlowDownRendering"] = "False";
+  }
   *merged_json = overrides.dump();
   return true;
 }
