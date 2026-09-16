@@ -391,6 +391,9 @@ bool MergeVrClientSettingsOverrides(bool enabled, std::string_view base_json,
     // presents, so that also stalls head/controller updates in the VR menu.
     // Keep VR rendering continuous; leave the non-VR startup policy alone.
     overrides["FFlagSlowDownRendering"] = "False";
+    // The eye textures already use the OpenXR extent; render their contents
+    // at full resolution as well, without Roblox's dynamic downscaling.
+    overrides["FFlagDebugDisableDRS"] = "True";
   }
   *merged_json = overrides.dump();
   return true;
