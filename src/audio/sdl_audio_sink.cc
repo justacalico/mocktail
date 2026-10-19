@@ -15,10 +15,6 @@
 #include <utility>
 #include <vector>
 
-#if !SDL_VERSION_ATLEAST(3, 4, 0)
-#error "Mocktail borrowed audio buffers require SDL 3.4 or newer"
-#endif
-
 namespace mocktail::audio {
 namespace {
 
@@ -113,6 +109,7 @@ SDL_AudioFormat ToSdlFormat(PcmSampleFormat format) {
   return SDL_AUDIO_UNKNOWN;
 }
 
+#if SDL_VERSION_ATLEAST(3, 4, 0)
 struct SdlReleaseContext {
   AudioBufferReleaseCallback callback = nullptr;
   void* callback_context = nullptr;
@@ -129,6 +126,7 @@ void SDLCALL OnSdlBufferReleased(void* userdata, const void* data, int size) {
   }
   delete release;
 }
+#endif
 
 class SdlAudioSink final : public AudioSink {
  public:
@@ -176,6 +174,7 @@ class SdlAudioSink final : public AudioSink {
       queued = SDL_PutAudioStreamData(stream, buffer.data,
                                       static_cast<int>(buffer.size_bytes));
     } else {
+#if SDL_VERSION_ATLEAST(3, 4, 0)
       auto* release = new (std::nothrow)
           SdlReleaseContext{buffer.release_callback, buffer.release_context};
       if (release == nullptr) {
@@ -189,12 +188,23 @@ class SdlAudioSink final : public AudioSink {
       if (!queued) {
         delete release;
       }
+#else
+      queued = SDL_PutAudioStreamData(stream, buffer.data,
+                                      static_cast<int>(buffer.size_bytes));
+      if (queued) {
+        buffer.release_callback(buffer.release_context, buffer.data,
+                                buffer.size_bytes);
+      }
+#endif
     }
-    const Status status = queued
-                              ? Status::Ok()
-                              : SdlError(buffer.release_callback == nullptr
-                                             ? "SDL_PutAudioStreamData"
-                                             : "SDL_PutAudioStreamDataNoCopy");
+    const char* enqueue_operation = "SDL_PutAudioStreamData";
+#if SDL_VERSION_ATLEAST(3, 4, 0)
+    if (buffer.release_callback != nullptr) {
+      enqueue_operation = "SDL_PutAudioStreamDataNoCopy";
+    }
+#endif
+    const Status status =
+        queued ? Status::Ok() : SdlError(enqueue_operation);
     EndCall();
     return status;
   }

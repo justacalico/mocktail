@@ -717,7 +717,9 @@ bool VulkanTextOverlayCompositor::RegisterDevice(
   import_params.lock_queue = &Impl::LockQueue;
   import_params.unlock_queue = &Impl::UnlockQueue;
   import_params.queue_ctx = state.get();
+#if PL_API_VER >= 351
   import_params.no_compute = true;
+#endif
   import_params.max_api_version = api_version;
   state->vulkan = pl_vulkan_import(state->log, &import_params);
   if (state->vulkan == nullptr) {

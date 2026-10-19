@@ -318,6 +318,59 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  deb-debian13:
+    name: DEB (Debian 13)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Build DEB
+        shell: bash
+        run: |
+          nightly_suffix=".nightly.$(git show -s --format=%cd --date=format:%Y%m%d%H%M%S "$GITHUB_SHA").g${GITHUB_SHA:0:8}"
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE:/workspace" \
+            --workdir /workspace \
+            --env MOCKTAIL_PACKAGE_VERSION_SUFFIX="$nightly_suffix" \
+            debian:13 bash -Eeuo pipefail -c '
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update
+              apt-get install --yes --no-install-recommends \
+                build-essential cmake git ninja-build pkg-config lld fakeroot \
+                dpkg-dev file libsdl3-dev libsdl3-ttf-dev \
+                libcurl4-openssl-dev libssl-dev nlohmann-json3-dev \
+                libyaml-dev libelf-dev libminizip-dev libcapstone-dev \
+                libgtk-4-dev libadwaita-1-dev libwebkitgtk-6.0-dev \
+                libutf8proc-dev libfontconfig1-dev libegl-dev \
+                libvulkan-dev libplacebo-dev libpng-dev zlib1g-dev
+              cmake -S . -B build-deb -G Ninja \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_INSTALL_PREFIX=/usr \
+                -DMOCKTAIL_PACKAGE_NAME=mocktail-nightly \
+                -DMOCKTAIL_PACKAGE_VERSION_SUFFIX="$MOCKTAIL_PACKAGE_VERSION_SUFFIX" \
+                -DBUILD_TESTING=OFF
+              cmake --build build-deb --parallel 4
+              cpack --config build-deb/CPackConfig.cmake \
+                -G DEB -B dist/deb
+              for deb in dist/deb/*_amd64.deb; do
+                mv -- "$deb" "${deb%_amd64.deb}+debian13_amd64.deb"
+              done
+              dpkg-deb --info dist/deb/*.deb >/dev/null
+            '
+
+      - name: Upload DEB
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: Mocktail-DEB-Debian13
+          path: dist/deb/*.deb
+          if-no-files-found: error
+          retention-days: 14
+
   rpm:
     name: RPM (Fedora 44)
     runs-on: ubuntu-24.04
@@ -411,7 +464,7 @@ jobs:
   publish:
     name: Publish continuous packages
     if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
-    needs: [appimage, appimage-aarch64, deb, rpm, arch]
+    needs: [appimage, appimage-aarch64, deb, deb-debian13, rpm, arch]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
@@ -437,6 +490,7 @@ jobs:
             test -s "release/$appimage"
             test -s "release/$appimage.zsync"
           done
+          mv -- release/*+debian13_amd64.deb release/mocktail-nightly-debian13.deb
           mv -- release/*.deb release/mocktail-nightly.deb
           mv -- release/*.rpm release/mocktail-nightly.rpm
           mv -- release/*.pkg.tar.zst release/mocktail-nightly.pkg.tar.zst
@@ -458,7 +512,7 @@ jobs:
           stable_tag="$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)"
           gh release download "$stable_tag" --pattern '*.deb' --dir stable/deb
           gh release download "$stable_tag" --pattern '*.rpm' --dir stable/rpm
-          mapfile -t stable_debs < <(find stable/deb -maxdepth 1 -type f -name '*.deb' -print)
+          mapfile -t stable_debs < <(find stable/deb -maxdepth 1 -type f -name '*.deb' ! -name '*+debian13_*' -print)
           mapfile -t stable_rpms < <(find stable/rpm -maxdepth 1 -type f -name '*.rpm' -print)
           [[ "${#stable_debs[@]}" -eq 1 && "${#stable_rpms[@]}" -eq 1 ]]
           install -d -m 0700 "$RUNNER_TEMP/mocktail-native-gnupg"
@@ -491,7 +545,7 @@ jobs:
           gh release upload continuous release/* --clobber
           while IFS= read -r asset; do
             case "$asset" in
-              mocktail-nightly.AppImage|mocktail-nightly.AppImage.zsync|mocktail-nightly-aarch64.AppImage|mocktail-nightly-aarch64.AppImage.zsync|mocktail-nightly.deb|mocktail-nightly.rpm|mocktail-nightly.pkg.tar.zst)
+              mocktail-nightly.AppImage|mocktail-nightly.AppImage.zsync|mocktail-nightly-aarch64.AppImage|mocktail-nightly-aarch64.AppImage.zsync|mocktail-nightly.deb|mocktail-nightly-debian13.deb|mocktail-nightly.rpm|mocktail-nightly.pkg.tar.zst)
                 ;;
               Mocktail-*.AppImage|Mocktail-*.AppImage.zsync|mocktail_*.deb|mocktail-*.deb|mocktail-*.rpm|mocktail-*.pkg.tar.zst)
                 gh release delete-asset continuous "$asset" --yes

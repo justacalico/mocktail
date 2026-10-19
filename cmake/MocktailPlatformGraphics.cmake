@@ -7,7 +7,7 @@ get_filename_component(MOCKTAIL_PLATFORM_GRAPHICS_ROOT
   "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE
 )
 
-find_package(SDL3 3.4 REQUIRED CONFIG)
+find_package(SDL3 3.2 REQUIRED CONFIG)
 find_path(MOCKTAIL_EGL_INCLUDE_DIR EGL/egl.h REQUIRED)
 find_path(MOCKTAIL_GLES3_INCLUDE_DIR GLES3/gl3.h REQUIRED)
 
@@ -82,6 +82,13 @@ target_include_directories(mocktail_platform_sdl PRIVATE
   ${MOCKTAIL_PLATFORM_GENERATED_INCLUDE_DIR}
 )
 target_link_libraries(mocktail_platform_sdl PUBLIC SDL3::SDL3)
+if(SDL3_VERSION VERSION_LESS "3.4")
+  find_package(PkgConfig REQUIRED)
+  pkg_check_modules(MOCKTAIL_ICON_LIBPNG REQUIRED IMPORTED_TARGET libpng)
+  target_link_libraries(mocktail_platform_sdl PRIVATE
+    PkgConfig::MOCKTAIL_ICON_LIBPNG
+  )
+endif()
 target_compile_features(mocktail_platform_sdl PUBLIC cxx_std_17)
 target_compile_definitions(mocktail_platform_sdl PRIVATE
   MOCKTAIL_PROJECT_VERSION="${PROJECT_VERSION}"
