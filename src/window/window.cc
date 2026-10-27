@@ -1073,6 +1073,9 @@ bool Init(int width, int height, const char* title) {
   g_state.persisted_window = {};
   g_state.persisted_window.width = width;
   g_state.persisted_window.height = height;
+  g_state.persisted_window.configured_width = width;
+  g_state.persisted_window.configured_height = height;
+  g_state.persisted_window.has_configured_size = true;
   g_state.restored_fullscreen_sync_pending = false;
   if (g_state.state_persistence_active) {
     const WindowStateLoadResult restored = LoadWindowState(g_window_state_path);
@@ -1081,15 +1084,31 @@ bool Init(int width, int height, const char* title) {
                    restored.status.message().c_str());
     } else if (restored.found) {
       g_state.persisted_window = restored.state;
-      width = restored.state.width;
-      height = restored.state.height;
+      g_state.persisted_window.configured_width = width;
+      g_state.persisted_window.configured_height = height;
+      g_state.persisted_window.has_configured_size = true;
+      if (RestoredSizeApplies(restored.state, width, height)) {
+        width = restored.state.width;
+        height = restored.state.height;
+        std::fprintf(stderr,
+                     "  [window-state] restored logical=%dx%d fullscreen=%d "
+                     "maximized=%d position=%s\n",
+                     width, height, restored.state.fullscreen ? 1 : 0,
+                     restored.state.maximized ? 1 : 0,
+                     restored.state.has_position ? "saved" : "compositor");
+      } else {
+        g_state.persisted_window.width = width;
+        g_state.persisted_window.height = height;
+        std::fprintf(stderr,
+                     "  [window-state] configured logical=%dx%d replaces "
+                     "saved=%dx%d fullscreen=%d maximized=%d position=%s\n",
+                     width, height, restored.state.width,
+                     restored.state.height,
+                     restored.state.fullscreen ? 1 : 0,
+                     restored.state.maximized ? 1 : 0,
+                     restored.state.has_position ? "saved" : "compositor");
+      }
       g_state.restored_fullscreen_sync_pending = true;
-      std::fprintf(stderr,
-                   "  [window-state] restored logical=%dx%d fullscreen=%d "
-                   "maximized=%d position=%s\n",
-                   width, height, restored.state.fullscreen ? 1 : 0,
-                   restored.state.maximized ? 1 : 0,
-                   restored.state.has_position ? "saved" : "compositor");
     }
   }
   g_state.width = width;
