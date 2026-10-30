@@ -403,6 +403,23 @@ TEST(ReadinessCanaryTest, TeardownCrashLogStillRequiresRealEvidence) {
   EXPECT_FALSE(ValidateTeardownCrashLog(
       CanaryGraphicsBackend::kDirectVulkan, crashed + "[FATAL] boom\n",
       &error));
+
+  const std::string fmod_unconfirmed =
+      crashed +
+      "[mocktail][audio] fmod_java first_submission submitted_buffers=4 "
+      "submitted_bytes=16384 consumed_buffers=0 consumed_bytes=0 "
+      "discarded_buffers=0 discarded_bytes=0 pending_buffers=4\n";
+  error.clear();
+  EXPECT_TRUE(ValidateTeardownCrashLog(
+      CanaryGraphicsBackend::kDirectVulkan, fmod_unconfirmed, &error))
+      << error;
+
+  error.clear();
+  EXPECT_FALSE(ValidateTeardownCrashLog(
+      CanaryGraphicsBackend::kDirectVulkan,
+      fmod_unconfirmed +
+          "[mocktail][audio] fmod_java write_failed reason=test\n",
+      &error));
 }
 
 TEST(ReadinessCanaryTest, AcceptsRealPresentWithoutShaderPackSummary) {
