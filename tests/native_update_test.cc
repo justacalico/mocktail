@@ -315,6 +315,34 @@ TEST(ReadinessCanaryTest, AcceptsTeardownCrashAfterReadiness) {
   EXPECT_EQ(result.exit_code, 128 + SIGSEGV);
 }
 
+TEST(ReadinessCanaryTest, RejectsNonCrashExitAfterReadiness) {
+  TemporaryDirectory temporary;
+  CanaryOptions options;
+  options.runtime_binary = temporary.root() / "runtime";
+  options.cache_root = temporary.root() / "cache";
+  options.state_root = temporary.root() / "state";
+  options.payload_directory = temporary.root() / "payload";
+  options.timeout_seconds = 5;
+  Write(options.runtime_binary,
+        "#!/bin/sh\n"
+        "printf '%s\\n' "
+        "'[compat] legacy binary patches: disabled' "
+        "'[compat] signal-recovery handler disabled' "
+        "'[compat] native allocator retained; host allocator bridges "
+        "disabled' "
+        "'[window] first Roblox Vulkan frame presented' "
+        "'[window] vkQueuePresentKHR #240 window=0x1234' "
+        "'[window] automatic exit requested 5000 ms after first present' "
+        "'[main] window closed, shutting down'\n"
+        "exit 1\n");
+  ASSERT_EQ(chmod(options.runtime_binary.c_str(), 0700), 0);
+
+  const auto result = RunReadinessCanary(options);
+  EXPECT_FALSE(result);
+  EXPECT_FALSE(result.teardown_crash);
+  EXPECT_EQ(result.exit_code, 1);
+}
+
 TEST(ReadinessCanaryTest, RejectsCrashBeforeReadinessCompletes) {
   TemporaryDirectory temporary;
   CanaryOptions options;

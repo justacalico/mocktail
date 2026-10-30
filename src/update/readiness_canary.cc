@@ -517,11 +517,14 @@ CanaryResult RunReadinessCanary(const CanaryOptions& options) {
                          : 128 + (WIFSIGNALED(status) ? WTERMSIG(status) : 0);
   std::string log_error;
   const std::string log = ReadLog(result.log_path, &log_error);
+  const bool driver_teardown_crash =
+      (WIFSIGNALED(status) && WTERMSIG(status) == SIGSEGV) ||
+      (WIFEXITED(status) && WEXITSTATUS(status) == 128);
   if (result.exit_code != 0) {
     result.error =
         "graphics canary exited with status " +
         std::to_string(result.exit_code);
-    if (log_error.empty() &&
+    if (driver_teardown_crash && log_error.empty() &&
         ValidateTeardownCrashLog(options.graphics_backend, log,
                                  &log_error)) {
       std::fprintf(stderr,
