@@ -126,9 +126,6 @@ bool ValidateAudio(std::string_view log, bool require_clean_shutdown,
     *error = "graphics canary observed an FMOD audio failure";
     return false;
   }
-  if (!require_clean_shutdown) {
-    return true;
-  }
   const bool opensl = HasPositiveNumberAfter(
       log, "[mocktail][audio] OpenSL playback activity: submitted_buffers=");
   const bool fmod = HasPositiveNumberAfter(
@@ -137,19 +134,21 @@ bool ValidateAudio(std::string_view log, bool require_clean_shutdown,
       (!HasPositiveNumberAfter(
            log,
            "[mocktail][audio] OpenSL playback evidence: consumed_buffers=") ||
-       log.find("[mocktail][audio] OpenSL player shutdown: submitted=") ==
-           log.npos ||
-       log.find("clean=true") == log.npos)) {
+       (require_clean_shutdown &&
+        (log.find("[mocktail][audio] OpenSL player shutdown: submitted=") ==
+             log.npos ||
+         log.find("clean=true") == log.npos)))) {
     *error =
         "graphics canary submitted OpenSL audio without clean consumption";
     return false;
   }
   if (fmod &&
       (!HasPositiveNumberAfter(log, "consumed_buffers=") ||
-       log.find(
-           "[mocktail][audio] fmod_java shutdown submitted_buffers=") ==
-           log.npos ||
-       log.find("pending_buffers=0") == log.npos)) {
+       (require_clean_shutdown &&
+        (log.find(
+             "[mocktail][audio] fmod_java shutdown submitted_buffers=") ==
+             log.npos ||
+         log.find("pending_buffers=0") == log.npos)))) {
     *error = "graphics canary submitted FMOD audio without clean consumption";
     return false;
   }
